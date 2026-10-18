@@ -20,8 +20,8 @@ planning/
   todo/           approved by the user; decisions may still be open
   in-progress/    being worked on
   done/           finished, kept as the record
-  notes/          context several items share; notes have no state
-  reports/        HTML reports and their sidecars (`<name>.toml` + `<name>.html`); no state
+  notes/          context several items share; `state` in the file: draft or finished
+  reports/        HTML reports and their sidecars (`<name>.toml` + `<name>.html`); `state` as notes
   answers/        <id>.json: the user's answers and approvals — never yours to write
   .schema/        the JSON Schema editors validate against (`waterrise schema`)
   .gitignore      keeps the answers' lock files out of git (`waterrise init` writes it)
@@ -317,12 +317,14 @@ page; you commit nothing there yourself.
 
 | key | type | required | meaning |
 |---|---|---|---|
+| `state` | `"draft"` \| `"finished"` | default `"finished"` | draft while it is being written; finished when it can be relied on |
 | `section` | `[[section]]` | yes | the text, in sections |
 
 #### `kind = "report"`
 
 | key | type | required | meaning |
 |---|---|---|---|
+| `state` | `"draft"` \| `"finished"` | default `"finished"` | draft while it is being written; finished when it can be relied on |
 | `about` | reference |  | the plan it reports on; without it, a report on the project |
 | `file` | string |  | the HTML document, beside this file (default: this file's name, .html) |
 

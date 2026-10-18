@@ -7,6 +7,32 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.10.3]
+
+### Changed
+
+- **The pages wear vaelum.dev's dark look.** Charter for titles and reading,
+  Geist and Geist Mono for the controls (self-hosted under `static/`, OFL),
+  waterrise's blue accent. The index opens on what waits on you; an item's
+  to-do sits beside the article and wraps under it when narrow; the header
+  shows where you are and a live pill. Dark is the default, `data-theme="light"`
+  the light one. Behaviour and copy are unchanged.
+- **The waiting list on the index scrolls in a box of its own** and takes a
+  project filter when more than one project waits on you; the browser
+  remembers the choice.
+- **An item's kind and state sit in a bubble in the middle of the header**,
+  in place of the folder in the trail (`butler / h-8xmhhz`, not
+  `butler / reports/ / h-8xmhhz`) and of the badge line above the title. The
+  state is the folder for a plan, decision or review, and `state` for a note
+  or report.
+
+### Added
+
+- **Notes and reports have a state**: `state = "draft"` or `"finished"`
+  (default `finished`, so the ones already written stay as they were).
+  `waterrise new note` and `new report` start them as drafts. An older
+  waterrise reports `state` in a note or report as an unknown key.
+
 ## [2026.10.2]
 
 ### Added

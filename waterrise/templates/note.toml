@@ -5,6 +5,8 @@ title = "{title}"
 summary = "What this note holds, and which items read it."
 created = {today}
 updated = {today}
+# "finished" once it can be relied on.
+state = "draft"
 
 [[section]]
 id = "overview"

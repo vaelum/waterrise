@@ -3,16 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Planning</title>
+<title>waterrise</title>
 <link rel="stylesheet" href="/static/{{V}}/app.css">
 <script src="/static/{{V}}/marked.min.js" defer></script>
 <script src="/static/{{V}}/app.js" defer></script>
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="/">planning</a>
-  <nav id="crumbs" class="crumbs"></nav>
-  <span id="live" class="live" aria-live="polite"></span>
+  <div class="in">
+    <div class="left">
+      <a class="brand" href="/"><span class="mark" aria-hidden="true"><span></span><span></span><span></span></span>waterrise</a>
+      <nav class="crumbs" aria-label="Where you are"><ul id="crumbs"></ul></nav>
+    </div>
+    <span id="here" class="here" aria-label="Kind and folder of this item" hidden></span>
+    <span class="live" aria-live="polite"><span class="dot" aria-hidden="true"></span><span id="live"></span></span>
+  </div>
 </header>
 <main id="main"><p class="muted">Loading…</p></main>
 <div id="bar" class="bar" hidden></div>

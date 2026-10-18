@@ -44,6 +44,8 @@ OWNERS = ("agent", "user")
 STEP_STATES = ("open", "active", "done", "blocked", "dropped")
 SEVERITIES = ("critical", "high", "medium", "low", "info")
 FINDING_STATES = ("open", "confirmed", "rejected", "fixed", "moved")
+# A note or a report has no folder per state: it says in the file whether it is done.
+DOC_STATES = ("draft", "finished")
 
 # Fields of a step that change as work happens. An approval covers the rest,
 # so ticking a step never makes its approval stale, and rewording it always does.
@@ -227,10 +229,12 @@ KIND_SPECS: dict[str, Spec] = {
     }),
     "note": Spec("note", {
         **COMMON,
+        "state": F(enum(*DOC_STATES), "draft while it is being written; finished when it can be relied on", default="finished"),
         "section": F(tables(SECTION), "the text, in sections", True),
     }),
     "report": Spec("report", {
         **COMMON,
+        "state": F(enum(*DOC_STATES), "draft while it is being written; finished when it can be relied on", default="finished"),
         "about": F(REF, "the plan it reports on; without it, a report on the project"),
         "file": F(STR, "the HTML document, beside this file (default: this file's name, .html)"),
     }),

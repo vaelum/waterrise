@@ -8,6 +8,7 @@
   const main = document.getElementById('main');
   const crumbs = document.getElementById('crumbs');
   const live = document.getElementById('live');
+  const here = document.getElementById('here');
   const bar = document.getElementById('bar');
   const toastEl = document.getElementById('toast');
   let timer = null;
@@ -71,7 +72,8 @@
     clearTimeout(toast.t); toast.t = setTimeout(() => toastEl.classList.remove('on'), 2500);
   }
 
-  function say(msg, err) { live.textContent = msg || ''; live.className = 'live' + (err ? ' err' : ''); }
+  // The pill in the header: what is being saved, or that the page is live.
+  function say(msg, err) { live.textContent = msg || 'live · ' + location.host; live.parentElement.classList.toggle('err', !!err); }
 
   async function api(method, path, body) {
     const opt = { method, cache: 'no-store', headers: Object.assign({}, HEADER) };
@@ -85,9 +87,18 @@
 
   function badge(text, cls) { return h('span', { class: 'badge ' + (cls || '') }, text); }
 
-  function setCrumbs(parts) {
-    crumbs.replaceChildren(...parts.map(p => p.href ? h('a', { href: p.href }, p.text) : h('span', {}, p.text)));
+  // The last part is where the page is; it is marked, not linked. An item's
+  // kind and state go in the bubble in the middle of the header instead: the
+  // folder for a plan, decision or review, the file's `state` for a note or report.
+  const STATE = { draft: 'muted', todo: 'open', 'in-progress': 'warn', done: 'ok', finished: 'ok' };
+  function setCrumbs(parts, item) {
+    crumbs.replaceChildren(...parts.map((p, i) => h('li', {}, i === parts.length - 1
+      ? h('span', { 'aria-current': 'page' }, p.text) : p.href ? h('a', { href: p.href }, p.text) : h('span', {}, p.text))));
+    here.replaceChildren(...(item ? [badge(item.kind, 'muted'), badge(item.state, STATE[item.state] || 'muted')] : []));
+    here.hidden = !item;
   }
+
+  function back(href) { return h('a', { class: 'back', href }, 'Back'); }
 
   function poll(fn, ms) {
     clearInterval(timer);
@@ -171,33 +182,54 @@
 
   async function viewIndex() {
     setCrumbs([]);
-    document.title = 'Planning';
+    document.title = 'waterrise';
     bar.hidden = true;
+    // The project the waiting list shows ('' for all). Remembered per browser.
+    let only = '';
+    try { only = localStorage.getItem('planning-waiting-only') || ''; } catch (e) { /* private window */ }
     async function load() {
       let data;
       try { data = await api('GET', '/api/repos'); say(''); } catch (e) { say('the service does not answer: ' + e.message, true); return; }
-      if (typing()) return;
+      // Not under an open filter: a redraw would close it.
+      if (typing() || (document.activeElement && document.activeElement.closest('.picker'))) return;
       const repos = data.repos || [];
-      const out = [h('h1', {}, 'Planning')];
-      const waiting = repos.filter(r => (r.waiting || []).length);
-      if (waiting.length) {
-        const box = h('div', { class: 'waiting' }, h('strong', {}, 'Waiting on you'));
-        for (const r of waiting) {
-          const ul = h('ul');
-          for (const w of r.waiting) {
-            ul.append(h('li', {}, h('a', { href: `/r/${r.slug}/i/${w.id}` }, w.title), ' ',
-              h('span', { class: 'muted small' }, w.for_user.map(x => x.what + (x.local ? ' ' + x.local : '')).join(' · '))));
-          }
-          box.append(h('div', {}, h('a', { href: `/r/${r.slug}/` }, r.name), ul));
-        }
-        out.push(box);
-      } else if (repos.length) {
-        out.push(h('p', { class: 'lead' }, 'Nothing waits on you.'));
+      const rows = repos.flatMap(r => (r.waiting || []).map(w => ({ r, w })));
+      const first = rows.length ? `/r/${rows[0].r.slug}/i/${rows[0].w.id}` : null;
+      const n = repos.length;
+      const intro = h('div', {}, h('h1', {}, 'waterrise'),
+        h('p', { class: 'lede' }, 'Typed plans your agent writes, and the pages where you answer them.',
+          first ? [' ', h('a', { class: 'quiet', href: first }, 'Answer the first →')] : null),
+        n ? h('p', { class: 'muted' }, `${n === 1 ? 'One repository is' : n + ' repositories are'} registered. `,
+              'Pick an item to answer its decisions and approve its gated steps; nothing leaves this machine.')
+          : h('p', { class: 'muted' }, 'No repository is registered. Run ', h('code', {}, 'waterrise serve'), ' in one.'));
+      const side = h('nav', { 'aria-label': 'Waiting on you' });
+      if (rows.length) {
+        const projects = repos.filter(r => (r.waiting || []).length);
+        if (!projects.some(r => r.slug === only)) only = '';
+        const label = h('div', { class: 'label' });
+        const list = h('div', { class: 'rows waiting' });
+        const draw = () => {
+          const shown = only ? rows.filter(x => x.r.slug === only) : rows;
+          label.textContent = `Waiting on you · ${shown.length}` + (shown.length < rows.length ? ` of ${rows.length}` : '');
+          list.replaceChildren(...shown.map(({ r, w }) => h('a', { class: 'row-link', href: `/r/${r.slug}/i/${w.id}` },
+            h('span', { class: 'repo' }, r.name),
+            h('span', { class: 'what' }, h('span', { class: 't' }, mdi(w.title)),
+              h('span', { class: 'tags' }, h('span', { class: 'id' }, w.id), waitTags(w.for_user).map(t => badge(t, 'open')))))));
+          list.scrollTop = 0;
+        };
+        const filter = projects.length > 1 ? picker('Show the items of one project',
+          [{ value: '', text: 'All projects', n: rows.length }].concat(projects.map(r => ({ value: r.slug, text: r.name, n: r.waiting.length }))),
+          only, value => {
+            only = value;
+            try { localStorage.setItem('planning-waiting-only', only); } catch (err) { /* private window */ }
+            draw();
+          }) : null;
+        draw();
+        side.append(h('div', { class: 'wait-head' }, label, filter), list);
+      } else if (n) {
+        side.append(h('p', { class: 'lead' }, 'Nothing waits on you.'));
       }
-      if (!repos.length) {
-        out.push(h('p', { class: 'lead' }, 'No repository is registered. Run ',
-          h('code', {}, 'waterrise serve'), ' in one.'));
-      }
+      const out = [h('section', { class: 'intro' }, h('div', { class: 'in' }, intro, side))];
       // Worktrees under their main checkout: the one whose .git is the common dir.
       const groups = new Map();
       for (const r of repos) {
@@ -205,12 +237,11 @@
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(r);
       }
-      out.push(h('h2', {}, 'Repositories'));
       const grid = h('div', { class: 'grid' });
       for (const [common, list] of groups) {
         list.sort((a, b) => (common === a.path + '/.git' ? -1 : 0) - (common === b.path + '/.git' ? -1 : 0) || a.slug.localeCompare(b.slug));
         const [first, ...rest] = list;
-        const card = h('div', { class: 'card item-card' }, repoLine(first));
+        const card = h('div', { class: 'card repo-card' }, repoLine(first));
         if (rest.length) {
           const d = h('details', {}, h('summary', { class: 'small muted' }, `${rest.length} worktree${rest.length > 1 ? 's' : ''}`));
           for (const r of rest) d.append(h('div', { class: 'small' }, repoLine(r)));
@@ -218,25 +249,82 @@
         }
         grid.append(card);
       }
-      out.push(grid);
+      if (n) out.push(h('section', { class: 'repos' }, h('h2', {}, 'Repositories'), grid));
       main.replaceChildren(...out);
+    }
+    // A drop-down in the page's own look: a pill that opens a list. The
+    // keyboard works as on a native one: arrows, Home/End, Enter, Escape.
+    function picker(label, choices, value, onpick) {
+      const name = c => [h('span', { class: 'pick-name' }, c.text), h('span', { class: 'pick-n' }, String(c.n))];
+      const current = () => choices.find(c => c.value === value) || choices[0];
+      const btn = h('button', { type: 'button', class: 'picker-btn', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-label': label });
+      const list = h('ul', { class: 'picker-list', role: 'listbox', 'aria-label': label, tabindex: '-1', hidden: true });
+      const wrap = h('div', { class: 'picker' }, btn, list);
+      let at = 0;
+      const opts = choices.map((c, i) => h('li', { role: 'option', id: `pick-${i}`, 'data-value': c.value,
+        onmousemove: () => mark(i), onclick: () => choose(i) }, h('span', { class: 'pick-check', 'aria-hidden': 'true' }, '✓'), ...name(c)));
+      list.append(...opts);
+      function paint() {
+        btn.replaceChildren(...name(current()), h('span', { class: 'pick-caret', 'aria-hidden': 'true' }));
+        opts.forEach((o, i) => o.setAttribute('aria-selected', String(choices[i].value === value)));
+      }
+      function mark(i) {
+        at = Math.max(0, Math.min(opts.length - 1, i));
+        opts.forEach((o, j) => o.classList.toggle('at', j === at));
+        list.setAttribute('aria-activedescendant', opts[at].id);
+        opts[at].scrollIntoView({ block: 'nearest' });
+      }
+      function open() {
+        list.hidden = false; btn.setAttribute('aria-expanded', 'true');
+        mark(Math.max(0, choices.findIndex(c => c.value === value)));
+        list.focus();
+        document.addEventListener('pointerdown', outside, true);
+      }
+      function close(refocus) {
+        if (list.hidden) return;
+        list.hidden = true; btn.setAttribute('aria-expanded', 'false');
+        document.removeEventListener('pointerdown', outside, true);
+        if (refocus) btn.focus();
+      }
+      function outside(e) { if (!wrap.contains(e.target)) close(false); }
+      function choose(i) { value = choices[i].value; paint(); close(true); onpick(value); }
+      btn.addEventListener('click', () => (list.hidden ? open() : close(true)));
+      btn.addEventListener('keydown', e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); open(); } });
+      list.addEventListener('keydown', e => {
+        const keys = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: opts.length - 1, PageDown: at + 5, PageUp: at - 5 };
+        if (e.key in keys) { e.preventDefault(); mark(keys[e.key]); }
+        else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(at); }
+        else if (e.key === 'Escape') { e.preventDefault(); close(true); }
+        else if (e.key === 'Tab') close(false);
+      });
+      list.addEventListener('focusout', e => { if (!wrap.contains(e.relatedTarget)) close(false); });
+      paint();
+      return wrap;
+    }
+    // What a waiting item asks for, counted: "2 decisions", "1 gate".
+    function waitTags(list) {
+      const names = { decision: ['decision', 'decisions'], approval: ['gate', 'gates'], 'plan-approval': ['plan approval', 'plan approvals'],
+                      step: ['step', 'steps'], disapproved: ['disapproved', 'disapproved'] };
+      const counts = new Map();
+      for (const x of list || []) counts.set(x.what, (counts.get(x.what) || 0) + 1);
+      return [...counts].map(([what, c]) => { const nm = names[what] || [what, what]; return `${c} ${c === 1 ? nm[0] : nm[1]}`; });
     }
     function repoLine(r) {
       const counts = {};
       for (const it of r.items || []) counts[it.folder] = (counts[it.folder] || 0) + 1;
-      const line = h('div', {}, h('a', { class: 'title', href: `/r/${r.slug}/` }, r.name), ' ',
-        r.branch ? h('span', { class: 'muted small' }, r.branch) : null, ' ',
+      const line = h('div', { class: 'name-line' }, h('a', { class: 'name', href: `/r/${r.slug}/` }, r.name),
+        r.branch ? h('span', { class: 'muted small' }, r.branch) : null,
         r.home === 'central' ? badge('plans centrally', 'muted') : null);
-      const meta = h('div', { class: 'meta' }, r.path);
+      const meta = h('div', { class: 'meta' }, h('div', { class: 'path' }, r.path));
       if (r.missing) {
-        meta.append(' — ', badge('missing', 'warn'), ' ',
+        meta.append(badge('missing', 'warn'), ' ',
           h('button', { class: 'link', onclick: async () => {
             try { await api('DELETE', `/api/repos/${r.slug}`); viewIndex(); } catch (e) { toast(e.message); }
           } }, 'Forget'));
       } else {
         const parts = ['draft', 'todo', 'in-progress', 'done', 'notes'].filter(k => counts[k]).map(k => `${k} ${counts[k]}`);
         if (!r.typed) parts.push('not typed' + ((r.legacy || []).length ? ` · ${r.legacy.length} Markdown` : ''));
-        meta.append(h('div', {}, parts.join(' · ')));
+        if (parts.length) meta.append(h('div', { class: 'counts' }, parts.join(' · ')));
       }
       return h('div', {}, line, meta);
     }
@@ -257,9 +345,9 @@
       let r;
       try { r = await api('GET', `/api/r/${slug}`); say(''); } catch (e) { say(e.message, true); return; }
       if (typing() || drag) return;
-      document.title = r.name + ' · planning';
+      document.title = r.name + ' · waterrise';
       setCrumbs([{ text: r.name }]);
-      const out = [h('h1', {}, r.name), h('p', { class: 'lead mono small' }, r.path + (r.branch ? '  (' + r.branch + ')' : ''))];
+      const out = [back('/'), h('h1', {}, r.name), h('p', { class: 'where' }, r.path + (r.branch ? ' (' + r.branch + ')' : ''))];
       if (r.home === 'central') out.push(h('p', { class: 'muted small' }, 'Plans centrally, in ', h('span', { class: 'mono' }, r.planning), '.'));
       if (r.missing) { out.push(h('p', {}, 'This repository is no longer on disk.')); main.replaceChildren(...out); return; }
       if (!r.typed) {
@@ -280,7 +368,7 @@
           for (const it of items) list.append(itemCard(slug, it, true));
           if (!items.length) list.append(h('li', { class: 'lane-empty muted small' }, 'empty'));
           lanes.append(h('section', { class: 'lane', 'data-folder': folder },
-            h('h2', {}, folder + '/', ' ', h('span', { class: 'muted small' }, String(items.length))),
+            h('div', { class: 'lane-head' }, h('h2', {}, folder + '/'), h('span', { class: 'count' }, String(items.length))),
             h('div', { class: 'lane-why small', hidden: true }), list));
           dropTarget(list);
         }
@@ -290,10 +378,9 @@
       }
       const notes = all.filter(i => i.folder === 'notes');
       if (notes.length) {
-        out.push(h('h2', {}, 'notes/'));
-        const grid = h('div', { class: 'grid' });
-        for (const it of notes) grid.append(itemCard(slug, it, false));
-        out.push(grid);
+        out.push(h('h2', {}, 'notes/'), h('div', { class: 'rows notes' }, notes.map(it => it.broken
+          ? h('div', { class: 'row-link' }, h('span', { class: 'id' }, it.file), h('span', {}, badge('cannot be read', 'warn')))
+          : h('a', { class: 'row-link', href: `/r/${slug}/i/${it.id}` }, h('span', { class: 'id' }, it.id), h('span', {}, mdi(it.title))))));
       }
       // The project's reports first, then those about a plan (each also on its plan's page).
       const reports = all.filter(i => i.folder === 'reports').sort((a, b) => (a.about ? 1 : 0) - (b.about ? 1 : 0));
@@ -464,12 +551,11 @@
       }
       const pct = it.steps.total ? Math.round(100 * it.steps.done / it.steps.total) : 0;
       const card = h(inLane ? 'li' : 'div', { class: 'card item-card', 'data-id': it.id },
-        h('div', { class: 'card-head' }, inLane ? handle(it) : null,
-          h('div', {}, badge(it.kind, 'muted'), ' ', h('a', { class: 'title', href: `/r/${slug}/i/${it.id}`, draggable: 'false' }, mdi(it.title)))),
-        h('div', { class: 'meta mono' }, it.id));
+        h('div', { class: 'card-head' }, inLane ? handle(it) : null, badge(it.kind, 'muted'), h('span', { class: 'id' }, it.id)),
+        h('a', { class: 'title', href: `/r/${slug}/i/${it.id}`, draggable: 'false' }, mdi(it.title)));
       if (it.steps.total) {
-        card.append(h('div', { class: 'progress' }, h('span', { style: null })),
-          h('div', { class: 'meta' }, `${it.steps.done}/${it.steps.total} steps`));
+        card.append(h('div', { class: 'progress-line' }, h('div', { class: 'progress' }, h('span', { style: null })),
+          h('span', { class: 'steps-n' }, `${it.steps.done}/${it.steps.total} steps`)));
         card.querySelector('.progress > span').style.width = pct + '%';
       }
       const b = h('div', { class: 'badges' });
@@ -512,7 +598,7 @@
     async function load() {
       try {
         const f = await api('GET', `/api/r/${slug}/file/${path}`);
-        main.replaceChildren(h('p', { class: 'lead' }, badge('read-only', 'muted'), ' a Markdown plan from before format 1'), md(f.text));
+        main.replaceChildren(back(`/r/${slug}/`), h('p', { class: 'lead' }, badge('read-only', 'muted'), ' a Markdown plan from before format 1'), md(f.text));
       } catch (e) { main.replaceChildren(h('p', {}, e.message)); }
     }
     await load();
@@ -567,12 +653,12 @@
 
     function render() {
       const v = view, d = v.data, ans = v.answers || {};
-      document.title = d.title + ' · planning';
-      setCrumbs([{ text: v.repo.name, href: `/r/${slug}/` }, { text: v.folder + '/' }, { text: v.id }]);
-      const out = [];
-      out.push(h('div', { class: 'badges' }, badge(v.kind, 'muted'), badge(v.folder, 'muted'), h('span', { class: 'mono small muted' }, v.id + ' · ' + v.file)));
+      document.title = d.title + ' · waterrise';
+      const state = v.kind === 'note' || v.kind === 'report' ? d.state || 'finished' : v.folder;
+      setCrumbs([{ text: v.repo.name, href: `/r/${slug}/` }, { text: v.id }], { kind: v.kind, state });
+      const out = [back(`/r/${slug}/`)];
       out.push(h('h1', {}, d.title));
-      if (d.summary) out.push(h('p', { class: 'lead' }, mdi(d.summary)));
+      if (d.summary) out.push(h('p', { class: 'lede' }, mdi(d.summary)));
 
       const probs = (v.problems || []);
       if (probs.length) {
@@ -580,7 +666,6 @@
         out.push(h('div', { class: 'problems' + (errs.length ? '' : ' warn') }, h('strong', {}, 'planning check'),
           h('ul', {}, probs.map(p => h('li', {}, (p.line ? `line ${p.line}: ` : '') + p.message)))));
       }
-      out.push(todoPanel(v));
 
       const kv = [];
       for (const key of ['needs', 'context', 'related']) {
@@ -589,7 +674,7 @@
       }
       if ((d.touches || []).length) kv.push(h('div', { class: 'kv' }, 'touches: ', ...d.touches.map((x, i) => [i ? ', ' : '', h('code', {}, x)])));
       if (d.created) kv.push(h('div', { class: 'kv' }, `created ${d.created} · updated ${d.updated}`));
-      out.push(...kv);
+      if (kv.length) out.push(h('div', { class: 'kvs' }, kv));
 
       if (v.kind === 'plan' && v.plan_approval_required) out.push(planApproval(v));
 
@@ -632,7 +717,8 @@
       const decisions = v.kind === 'decision' ? [Object.assign({}, d, { id: v.id })] : (d.decision || []);
       if (decisions.length) {
         const open = decisions.filter(x => !(x.resolved || []).length);
-        out.push(h('h2', {}, v.kind === 'decision' ? 'The decision' : `Decisions (${open.length} open of ${decisions.length})`));
+        out.push(v.kind === 'decision' ? h('h2', {}, 'The decision')
+          : h('h2', {}, 'Decisions ', h('span', { class: 'h-meta' }, `${open.length} open of ${decisions.length}`)));
         for (const dec of decisions) out.push(decisionCard(dec, ans));
       }
 
@@ -640,8 +726,8 @@
         const steps = ph.step || [];
         const done = steps.filter(s => s.state === 'done' || s.state === 'dropped').length;
         const fin = steps.length && done === steps.length ? ' phase-done' : '';
-        out.push(h('h2', { class: 'phase' + fin, id: ph.id }, ph.title, ' ', h('span', { class: 'muted small' }, `${ph.id} · ${done}/${steps.length}`)));
-        if (ph.goal) out.push(h('p', { class: 'muted' + fin }, ph.goal));
+        out.push(h('h2', { class: 'phase' + fin, id: ph.id }, ph.title, ' ', h('span', { class: 'h-meta mono' }, `${ph.id} · ${done}/${steps.length}`)));
+        if (ph.goal) out.push(h('p', { class: 'goal' + fin }, ph.goal));
         const pc = comments(ph.id, true); if (fin) pc.classList.add('phase-done');
         out.push(pc);
         out.push(h('ul', { class: 'steps' + fin }, steps.map(s => stepCard(s, ans))));
@@ -669,7 +755,8 @@
       }
 
       out.push(h('h2', {}, 'Comments on the whole item'), comments('', true, true));
-      main.replaceChildren(...out);
+      // The to-do sits beside the article, and wraps under it when narrow.
+      main.replaceChildren(h('article', { class: 'article' }, out), h('aside', { class: 'todo-aside' }, todoPanel(v)));
       document.body.classList.toggle('focus', focusOn());
       renderBar(v, decisions, ans);
       if (location.hash && !render.scrolled) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); render.scrolled = true; }
@@ -698,8 +785,10 @@
       panel.append(h('h2', {}, now.length ? `For you now (${now.length})` : 'Nothing waits on you right now'));
       if (now.length) {
         panel.append(h('ul', { class: 'todo-list' }, now.map(x => h('li', {},
-          h('a', { href: '#' + (x.local || 'plan-approval'), onclick: jump(x.local) }, badge(WHAT[x.what] || x.what, x.what === 'step' ? 'user' : x.what === 'decision' ? 'open' : 'gate')),
-          ' ', x.local ? h('span', { class: 'mono small muted' }, x.local + ' ') : null, mdi(x.text)))));
+          h('a', { class: 'todo-now', href: '#' + (x.local || 'plan-approval'), onclick: jump(x.local) },
+            h('span', { class: 'todo-what' }, badge(WHAT[x.what] || x.what, x.what === 'step' ? 'user' : x.what === 'decision' ? 'open' : 'gate'),
+              x.local ? h('span', { class: 'id' }, x.local) : null),
+            mdi(x.text))))));
       }
       if (later.length) {
         panel.append(h('h3', {}, `Coming up for you (${later.length})`),
@@ -728,8 +817,9 @@
     function planApproval(v) {
       const pa = v.plan_approval || { status: 'none' };
       const box = h('div', { class: 'gatebox card ' + (pa.status === 'approved' ? 'approved' : pa.status === 'disapproved' ? 'disapproved' : ''), id: 'plan-approval' });
-      box.append(h('h3', {}, 'The plan as a whole'));
-      box.append(h('p', { class: 'small' }, statusText(pa, 'these phases and steps')));
+      const tag = pa.status === 'approved' ? badge('approved', 'ok') : pa.status === 'disapproved' ? badge('disapproved', 'gate') : badge('gate', 'gate');
+      box.append(h('div', { class: 'box-head' }, h('h3', {}, 'The plan as a whole'), tag));
+      box.append(h('p', { class: 'status' }, statusText(pa, 'these phases and steps')));
       if (pa.status === 'stale') box.append(diff(pa.snapshot, pa.now));
       box.append(approveRow(pa, 'approval/' + v.id, 'Approve plan'));
       return box;
@@ -767,8 +857,9 @@
       const recs = Array.isArray(dec.recommend) ? dec.recommend : (dec.recommend ? [dec.recommend] : []);
       const answered = (a.selected || []).length || (a.text || '').trim();
       const card = h('section', { class: 'card' + (resolved ? ' resolved' : answered ? ' is-answered' : ''), id: local });
-      card.append(h('h3', {}, resolved ? badge('resolved', 'ok') : answered ? badge('answered', 'ok') : badge('open', 'open'), mdi(dec.question)));
-      if (dec.context) card.append(md(dec.context));
+      card.append(h('div', { class: 'card-top' }, resolved ? badge('resolved', 'ok') : answered ? badge('answered', 'ok') : badge('open', 'open'),
+        h('span', { class: 'id' }, local)), h('h3', {}, mdi(dec.question)));
+      if (dec.context) card.append(md(dec.context, 'context'));
       if (dec.as_of) card.append(h('div', { class: 'kv' }, 'as checked on ' + dec.as_of));
       const fs = h('fieldset', { disabled: resolved || null });
       const type = dec.multiple ? 'checkbox' : 'radio';
@@ -932,8 +1023,9 @@
 
   function route() {
     const p = location.pathname.split('/').filter(Boolean).map(decodeURIComponent);
-    // The lanes want the width; everything else reads better narrow.
-    document.body.classList.toggle('wide', p[0] === 'r' && p.length === 2);
+    // Each view lays out its own width: the lanes want it, an item reads narrow.
+    document.body.dataset.view = !p.length ? 'index' : p[0] === 'r' && p.length === 2 ? 'repo'
+      : p[0] === 'r' && p[2] === 'i' ? 'item' : 'page';
     if (!p.length) return viewIndex();
     if (p[0] === 'r' && p.length === 2) return viewRepo(p[1]);
     if (p[0] === 'r' && p[2] === 'i' && p[3]) return viewItem(p[1], p[3]);

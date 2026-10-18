@@ -94,7 +94,8 @@ from .state import decision_local, plan_approval, satisfied, step_approval, summ
 from .types import ID_RE, STATE_FOLDERS, jsonable, plan_hash, plan_snapshot, step_hash, step_snapshot
 
 STATIC = Path(__file__).resolve().parent / "static"
-ASSETS = ("app.css", "app.js", "events.js", "marked.min.js", "marked.LICENSE.md")
+ASSETS = ("app.css", "app.js", "events.js", "marked.min.js", "marked.LICENSE.md",
+          "geist.woff2", "geist-mono.woff2", "geist.LICENSE.txt")
 MAX_BODY = 256 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -458,10 +459,11 @@ class Handler(BaseHTTPRequestHandler):
                               {"Content-Security-Policy": CSP})
         if parts[0] == "static" and len(parts) == 3 and parts[1] == self.version and parts[2] in ASSETS:
             data = (STATIC / parts[2]).read_bytes()
-            ctype = {"js": "text/javascript", "css": "text/css"}.get(parts[2].rsplit(".", 1)[-1],
-                                                                     "text/plain")
+            ext = parts[2].rsplit(".", 1)[-1]
+            ctype = ("font/woff2" if ext == "woff2" else
+                     {"js": "text/javascript", "css": "text/css"}.get(ext, "text/plain") + "; charset=utf-8")
             self.send_response(200)
-            self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+            self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.send_header("X-Content-Type-Options", "nosniff")
