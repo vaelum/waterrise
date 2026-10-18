@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "waterrise"
+# Single-sourced from waterrise.__version__, as butler does it: the number
+# `waterrise --version` prints, and the one butler's pin is checked against.
+dynamic = ["version"]
+description = "Typed plans, decisions and approvals in a folder, and the local pages to answer them"
+readme = "README.md"
+# 3.11 for tomllib; stdlib only, so `python -m waterrise install` runs from a
+# checkout on a bare interpreter.
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "build>=1"]
+
+[project.scripts]
+waterrise = "waterrise.__main__:main"
+
+[tool.hatch.version]
+path = "waterrise/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["waterrise"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Run against the working tree, no install step. The package sits at the root,
+# not under src/, so that `python -m waterrise install` works in a fresh
+# checkout before anything is installed.
+pythonpath = ["."]
