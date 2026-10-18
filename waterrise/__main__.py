@@ -11,6 +11,11 @@ from .command import Node
 from .context import prog, resolve
 from .errors import WaterriseError
 
+# The commands after which a central project's folder is committed in the
+# central repository. `check` is one: the guide has agents run it after every
+# edit of an item, so their edits get a commit too.
+WRITES = ("init", "new", "move", "resolve", "convert", "schema", "check")
+
 
 def _global_flags() -> argparse.ArgumentParser:
     """The flags every level takes, as the harness has them.
@@ -78,7 +83,12 @@ def main(argv: list[str] | None = None, *, cwd: Path | None = None) -> int:
     try:
         ctx = resolve(cwd)
         ctx.dry_run, ctx.verbose, ctx.args = args.dry_run, args.verbose, args
-        return args._func(ctx, args) or 0
+        rc = args._func(ctx, args) or 0
+        if ctx.home == "central" and ctx.slug and args._level0 in WRITES and not ctx.dry_run:
+            from . import central
+
+            central.commit(ctx.slug, f"{ctx.slug}: {' '.join(a for a in argv if a != '--no-color')}")
+        return rc
     except WaterriseError as e:
         ui.err(e.message, e.hint)
         return e.code

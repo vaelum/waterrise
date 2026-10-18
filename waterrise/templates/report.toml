@@ -1,0 +1,9 @@
+#:schema {schema}
+kind = "report"
+id = "{id}"
+title = "{title}"
+summary = "What was measured or compared, and what came of it, in one or two sentences."
+created = {today}
+updated = {today}
+# The plan it reports on; leave it out for a report on the project.
+# about = "p-xxxxxx"

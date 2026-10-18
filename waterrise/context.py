@@ -5,8 +5,10 @@ Where it comes from, first match wins:
 
     root      $WATERRISE_PROJECT, else the registered project the cwd is in,
               else the git toplevel of the cwd, else the cwd
-    planning  $WATERRISE_PLANNING_DIR (relative to the root), else the
-              registry's entry, else <root>/planning
+    planning  a central project's folder in the central repository (its
+              home, in the registry); else $WATERRISE_PLANNING_DIR
+              (relative to the root), else the registry's entry, else
+              <root>/planning
     name      $WATERRISE_PROJECT_NAME, else the registry's entry, else
               butler/butler.toml's [project] name, else the root's name
 
@@ -50,6 +52,9 @@ class Project:
     root: Path
     planning: Path
     name: str
+    home: str = "repo"              # "repo" or "central"
+    slug: str | None = None         # its registry slug, once registered
+    git_root: Path | None = None    # where git runs for the planning folder
     dry_run: bool = False
     verbose: bool = False
     args: object | None = field(default=None, repr=False)
@@ -61,6 +66,10 @@ class Project:
             return str(p.resolve().relative_to(self.root.resolve()))
         except ValueError:
             return str(p)
+
+    @property
+    def registered(self) -> bool:
+        return self.slug is not None
 
     def would(self, description: str) -> bool:
         """Guard a change for --dry-run: print it and say so instead."""
@@ -103,6 +112,7 @@ def _butler_name(root: Path) -> str | None:
 
 
 def resolve(cwd: Path | None = None) -> Project:
+    from . import central
     from .client import registry
 
     cwd = (cwd or Path.cwd()).resolve()
@@ -115,7 +125,9 @@ def resolve(cwd: Path | None = None) -> Project:
         entry = _registered(cwd, entries)
         root = Path(entry["path"]) if entry else (_git_toplevel(cwd) or cwd)
     env_dir = os.environ.get(PLANNING_ENV)
-    if env_dir:
+    if central.is_central(entry):
+        planning = Path(entry["planning"])
+    elif env_dir:
         planning = root / env_dir
     elif entry and entry.get("planning"):
         planning = Path(entry["planning"])
@@ -123,4 +135,6 @@ def resolve(cwd: Path | None = None) -> Project:
         planning = root / "planning"
     name = (os.environ.get(NAME_ENV) or (entry or {}).get("name") or _butler_name(root)
             or root.name)
-    return Project(root=root, planning=planning, name=name)
+    return Project(root=root, planning=planning, name=name,
+                   home=(entry or {}).get("home") or "repo", slug=(entry or {}).get("slug"),
+                   git_root=central.root() if central.is_central(entry) else root)

@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<!--
+  A waterrise report: one file, everything inline. The page shows it in a
+  sandboxed frame that allows inline script and style and nothing remote, so
+  no fonts, scripts, images or styles from elsewhere: they would not load.
+  Links (<a href>) are fine. Replace everything below the header.
+-->
+<style>
+  :root {
+    --bg: #fbfbf9; --fg: #1d1d1b; --muted: #6b6b66; --line: #e3e2dc; --card: #ffffff;
+    --accent: #2f6db5; --s1: #2f6db5; --s2: #c2652a; --s3: #4f8a3c; --s4: #8a4fa3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --fg: #ecebe6; --muted: #9c9b95; --line: #2c2c2a; --card: #1e1e1c;
+      --accent: #7aa7e0; --s1: #7aa7e0; --s2: #e39466; --s3: #8cc378; --s4: #c29ad6;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 52rem; margin: 0 auto; padding: 2.5rem 1rem 4rem; }
+  h1 { font-size: 1.7rem; line-height: 1.2; margin: 0 0 .4rem; }
+  h2 { font-size: 1.15rem; margin: 2.2rem 0 .6rem; }
+  .lead { color: var(--muted); margin: 0 0 1.5rem; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 1rem 1.2rem; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); }
+  th { font-weight: 600; color: var(--muted); font-size: .85rem; }
+  td.num, th.num { text-align: right; }
+  .bar { fill: var(--s1); }
+  .axis { stroke: var(--line); }
+  svg text { fill: var(--muted); font-size: 12px; }
+  @media (max-width: 40rem) { main { padding-top: 1.5rem; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>{title}</h1>
+  <p class="lead">What this report answers, for which plan, measured how and when.</p>
+
+  <h2>Findings</h2>
+  <div class="card">
+    <p>The answer first, in a sentence or two; the numbers below say why.</p>
+  </div>
+
+  <h2>The numbers</h2>
+  <table>
+    <thead><tr><th>Case</th><th class="num">Value</th></tr></thead>
+    <tbody>
+      <tr><td>A</td><td class="num">42</td></tr>
+      <tr><td>B</td><td class="num">27</td></tr>
+    </tbody>
+  </table>
+
+  <h2>A chart</h2>
+  <svg viewBox="0 0 320 120" width="100%" role="img" aria-label="A against B">
+    <line class="axis" x1="40" y1="100" x2="310" y2="100"/>
+    <rect class="bar" x="60" y="16" width="80" height="84"/>
+    <rect class="bar" x="180" y="46" width="80" height="54"/>
+    <text x="100" y="114" text-anchor="middle">A</text>
+    <text x="220" y="114" text-anchor="middle">B</text>
+  </svg>
+</main>
+</body>
+</html>

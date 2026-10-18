@@ -71,7 +71,7 @@ def test_boot_writes_enables_and_starts_the_unit(systemd, capsys):
     assert "WantedBy=default.target" in text and "Restart=on-failure" in text
     assert f"Environment=XDG_STATE_HOME={os.environ['XDG_STATE_HOME']}" in text
     assert calls(systemd) == ["--user daemon-reload", "--user enable waterrise.service",
-                              "--user restart waterrise.service"]
+                              "--user restart waterrise.service", "--user is-active --quiet waterrise.service"]
     assert "loginctl enable-linger someone" in capsys.readouterr().out
 
 
@@ -133,3 +133,13 @@ def test_service_run_serves_in_the_foreground(tmp_path):
     assert proc.returncode == 0, err
     assert "serving on" in err and "stopped" in err
     assert not info.exists()
+
+
+def test_boot_again_restarts_an_older_running_service(systemd, monkeypatch):
+    """--boot with an unchanged unit, while the unit's service is an older
+    version: the install must still restart it (it did not, 2026.10.1)."""
+    assert cli.main(["--no-color", "install", "--boot"]) == 0
+    systemd.write_text("")
+    monkeypatch.setattr(client, "find", lambda port=None: client.Running(8765, {"version": "2026.1.1-abcdef12"}))
+    assert cli.main(["--no-color", "install", "--boot"]) == 0
+    assert "--user restart waterrise.service" in calls(systemd)

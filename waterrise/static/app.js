@@ -225,7 +225,8 @@
       const counts = {};
       for (const it of r.items || []) counts[it.folder] = (counts[it.folder] || 0) + 1;
       const line = h('div', {}, h('a', { class: 'title', href: `/r/${r.slug}/` }, r.name), ' ',
-        r.branch ? h('span', { class: 'muted small' }, r.branch) : null);
+        r.branch ? h('span', { class: 'muted small' }, r.branch) : null, ' ',
+        r.home === 'central' ? badge('plans centrally', 'muted') : null);
       const meta = h('div', { class: 'meta' }, r.path);
       if (r.missing) {
         meta.append(' — ', badge('missing', 'warn'), ' ',
@@ -259,6 +260,7 @@
       document.title = r.name + ' · planning';
       setCrumbs([{ text: r.name }]);
       const out = [h('h1', {}, r.name), h('p', { class: 'lead mono small' }, r.path + (r.branch ? '  (' + r.branch + ')' : ''))];
+      if (r.home === 'central') out.push(h('p', { class: 'muted small' }, 'Plans centrally, in ', h('span', { class: 'mono' }, r.planning), '.'));
       if (r.missing) { out.push(h('p', {}, 'This repository is no longer on disk.')); main.replaceChildren(...out); return; }
       if (!r.typed) {
         out.push(h('div', { class: 'problems warn' }, 'Not a typed planning folder: ',
@@ -270,7 +272,7 @@
       }
       const all = r.items || [];
       byId = new Map(all.filter(i => i.id).map(i => [i.id, i]));
-      if (all.some(i => i.folder !== 'notes')) {
+      if (all.some(i => i.folder !== 'notes' && i.folder !== 'reports')) {
         const lanes = h('div', { class: 'lanes' });
         for (const folder of LANES) {
           const items = all.filter(i => i.folder === folder);
@@ -291,6 +293,19 @@
         out.push(h('h2', {}, 'notes/'));
         const grid = h('div', { class: 'grid' });
         for (const it of notes) grid.append(itemCard(slug, it, false));
+        out.push(grid);
+      }
+      // The project's reports first, then those about a plan (each also on its plan's page).
+      const reports = all.filter(i => i.folder === 'reports').sort((a, b) => (a.about ? 1 : 0) - (b.about ? 1 : 0));
+      if (reports.length) {
+        out.push(h('h2', {}, 'reports/'));
+        const grid = h('div', { class: 'grid' });
+        for (const it of reports) {
+          const card = itemCard(slug, it, false);
+          const plan = it.about && byId.get(it.about);
+          if (it.about) card.append(h('div', { class: 'muted small' }, 'about ', plan ? h('a', { href: `/r/${slug}/i/${plan.id}` }, plan.title) : h('code', {}, it.about)));
+          grid.append(card);
+        }
         out.push(grid);
       }
       const legacy = (r.legacy || []).concat(r.forms || []);
@@ -578,6 +593,17 @@
 
       if (v.kind === 'plan' && v.plan_approval_required) out.push(planApproval(v));
 
+      if (v.kind === 'report') {
+        if (v.about) out.push(h('p', { class: 'kv' }, 'about ', h('a', { href: `/r/${slug}/i/${v.about.id}` }, v.about.title)));
+        else out.push(h('p', { class: 'kv muted' }, 'a report on the project'));
+        // Its own scripts run, with an opaque origin: the frame cannot reach
+        // this page, the service's API or its token (see REPORT_CSP).
+        out.push(h('iframe', { class: 'report', src: v.document, sandbox: 'allow-scripts', title: d.title,
+          referrerpolicy: 'no-referrer' }));
+        out.push(h('p', { class: 'muted small' }, h('a', { href: v.document, target: '_blank', rel: 'noopener' }, 'Open the report on its own'),
+          ' · read-only here; comment below'));
+      }
+
       if (d.why) out.push(h('h2', { class: 'reading' }, 'Why'), md(d.why, 'reading'));
       if (d.subject) out.push(h('h2', { class: 'reading' }, 'Subject'), md(d.subject, 'reading'));
       if (d.method) out.push(h('h2', { class: 'reading' }, 'Method'), md(d.method, 'reading'));
@@ -595,6 +621,12 @@
             h('summary', {}, s.title), md(s.body), s.id ? comments(s.id) : null);
           out.push(det);
         });
+      }
+      if ((v.reports || []).length) {
+        out.push(h('h2', { class: 'reading' }, `Reports (${v.reports.length})`));
+        out.push(h('ul', { class: 'reading reports' }, v.reports.map(r => h('li', {},
+          h('a', { href: `/r/${slug}/i/${r.id}` }, r.title), r.updated ? h('span', { class: 'muted small' }, ' · ' + r.updated) : null,
+          r.summary ? h('div', { class: 'muted small' }, r.summary) : null))));
       }
 
       const decisions = v.kind === 'decision' ? [Object.assign({}, d, { id: v.id })] : (d.decision || []);

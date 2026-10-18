@@ -18,12 +18,14 @@ import datetime as _dt
 import re
 import subprocess
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .context import prog, short
 from .folder import Folder, Item
 from .state import (DONE_STEP, decision_local, decision_state, plan_approval, satisfied,
                     step_approval, summarize)
-from .types import FORMAT, ID_RE, KIND_OF_LETTER, LOCAL_RE, NOTES_FOLDER, STATE_FOLDERS, Problem
+from .types import (FORMAT, ID_RE, KIND_OF_LETTER, LOCAL_RE, NOTES_FOLDER, REPORTS_FOLDER, STATE_FOLDERS,
+                    Problem)
 
 # kind -> folders it may be in
 ALLOWED = {
@@ -31,7 +33,30 @@ ALLOWED = {
     "decision": ("draft", "done"),
     "review": ("draft", "in-progress", "done"),
     "note": (NOTES_FOLDER,),
+    "report": (REPORTS_FOLDER,),
 }
+
+# A report's document is opened in a sandboxed frame whose CSP allows nothing
+# remote; a resource from elsewhere would be broken there, and a leak of what
+# was read where it was fetched. A plain link (<a href>) cites, and loads nothing.
+REPORT_MAX = 16 * 1024 * 1024
+REMOTE_RESOURCE = re.compile(
+    r"""(?ix)
+      <(?:script|img|iframe|frame|embed|object|source|video|audio|track|input)\b[^>]*\s
+        (?:src|data|poster|srcset)\s*=\s*["']?\s*(?:https?:)?//
+    | <link\b[^>]*\shref\s*=\s*["']?\s*(?:https?:)?//
+    | url\(\s*["']?\s*(?:https?:)?//
+    | @import\s+(?:url\()?\s*["']?\s*(?:https?:)?//
+    | <form\b[^>]*\saction\s*=\s*["']?\s*(?:https?:)?//
+    """)
+CREDENTIAL = re.compile(
+    r"""(?x)
+      gh[pousr]_[A-Za-z0-9]{30,} | github_pat_[A-Za-z0-9_]{30,} | glpat-[A-Za-z0-9_-]{20,}
+    | \bsk-[A-Za-z0-9_-]{20,} | \bAKIA[0-9A-Z]{16}\b | xox[abprs]-[A-Za-z0-9-]{10,}
+    | -----BEGIN\ [A-Z\ ]*PRIVATE\ KEY-----
+    | (?i:\b(?:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token)\b)
+      \s*[:=]\s*["'][^"'\s]{8,}["']
+    """)
 
 
 @dataclass
@@ -68,7 +93,9 @@ class Report:
         return len(self.of("warn"))
 
     def closing(self) -> str:
-        parts = " · ".join(f"{k} {self.counts.get(k, 0)}" for k in (*STATE_FOLDERS, NOTES_FOLDER))
+        # Reports only once there are some, so a folder without them reads as it always did.
+        folders = (*STATE_FOLDERS, NOTES_FOLDER) + ((REPORTS_FOLDER,) if self.counts.get(REPORTS_FOLDER) else ())
+        parts = " · ".join(f"{k} {self.counts.get(k, 0)}" for k in folders)
         user = self.folder.user
         tail = []
         if self.waiting_user:
@@ -248,6 +275,48 @@ def folder_rules(item: Item, folder_name: str, ans: dict, *, plan_approval_requi
             if left:
                 why.append(f"findings still open: {', '.join(map(str, left))}")
     return why
+
+
+def report_document(item: Item) -> Path:
+    name = item.data.get("file")
+    return item.path.parent / (name if isinstance(name, str) and name else item.path.stem + ".html")
+
+
+def _check_report(report: Report, folder: Folder, item: Item, ids: dict[str, Item]) -> None:
+    rel, data = item.rel, item.data
+    about = data.get("about")
+    if isinstance(about, str) and about:
+        target = ids.get(about.split("/")[0])
+        if target is None:
+            report.add(rel, "error", f"about = {about!r}, but no item has that id",
+                       item.line_of(Problem("error", "", "about")))
+        elif target.kind != "plan":
+            report.add(rel, "error", f"about = {about!r} is a {target.kind}; a report is about a plan or the project",
+                       item.line_of(Problem("error", "", "about")))
+    doc = report_document(item)
+    if not doc.resolve().is_relative_to(item.path.parent.resolve()):
+        report.add(rel, "error", f"file = {data.get('file')!r} is outside {REPORTS_FOLDER}/")
+        return
+    shown = doc.relative_to(folder.root).as_posix()
+    if not doc.is_file():
+        report.add(rel, "error", f"its document {shown} does not exist")
+        return
+    size = doc.stat().st_size
+    if size > REPORT_MAX:
+        report.add(rel, "error", f"{shown} is {size // (1024 * 1024)} MB; a report is at most 16 MB")
+        return
+    text = doc.read_text(encoding="utf-8", errors="replace")
+    head = text[:2048].lstrip().lower()
+    if not (head.startswith("<!doctype html") or head.startswith("<html") or "<html" in head):
+        report.add(shown, "error", "is not an HTML document (no <!doctype html> or <html> at the start)")
+    for m in REMOTE_RESOURCE.finditer(text):
+        line = text.count("\n", 0, m.start()) + 1
+        report.add(shown, "error", f"loads something from another origin ({m.group(0).strip()[:60]}…); "
+                                   "a report carries everything inline", line)
+    for m in CREDENTIAL.finditer(text):
+        line = text.count("\n", 0, m.start()) + 1
+        report.add(shown, "error", "has something that looks like a credential; name the variable or the file "
+                                   "instead", line)
 
 
 def _check_item_content(report: Report, item: Item, ids: dict[str, Item], ans: dict, today) -> None:
@@ -476,6 +545,15 @@ def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> R
         if it.kind == "plan" and it.id:
             plan_needs[it.id] = [r for r in it.data.get("needs", []) or [] if isinstance(r, str)
                                  and ID_RE.match(r)]
+        if it.kind == "report":
+            _check_report(report, folder, it, ids)
+
+    claimed = {report_document(it).relative_to(folder.root).as_posix()
+               for it in folder.items if it.parsed and it.kind == "report"
+               and report_document(it).is_relative_to(folder.root)}
+    for rel in folder.report_files:
+        if rel.endswith((".html", ".htm")) and rel not in claimed:
+            report.add(rel, "warn", f"a report's document with no sidecar (`{short()} new report` makes the pair)")
 
     cyc = _cycle(plan_needs)
     if cyc:

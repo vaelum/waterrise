@@ -22,12 +22,14 @@ from typing import Any
 
 FORMAT = 1
 
-KINDS = ("plan", "decision", "review", "note")
-LETTER = {"plan": "p", "decision": "d", "review": "r", "note": "n"}
+KINDS = ("plan", "decision", "review", "note", "report")
+# A report is `h` (an HTML document): `r` was a review's long before reports.
+LETTER = {"plan": "p", "decision": "d", "review": "r", "note": "n", "report": "h"}
 KIND_OF_LETTER = {v: k for k, v in LETTER.items()}
 
 STATE_FOLDERS = ("draft", "todo", "in-progress", "done")
 NOTES_FOLDER = "notes"
+REPORTS_FOLDER = "reports"
 ANSWERS_FOLDER = "answers"
 SCHEMA_FOLDER = ".schema"
 CONFIG_FILE = "planning.toml"
@@ -35,7 +37,7 @@ CONFIG_FILE = "planning.toml"
 # Crockford's base32 in lowercase: no i, l, o or u, so an id read aloud or
 # typed from a screenshot cannot be mistaken for another.
 ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"
-ID_RE = re.compile(r"^([pdrn])-([0-9a-hjkmnp-tv-z]{6})$")
+ID_RE = re.compile(r"^([pdrnh])-([0-9a-hjkmnp-tv-z]{6})$")
 LOCAL_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
 OWNERS = ("agent", "user")
@@ -226,6 +228,11 @@ KIND_SPECS: dict[str, Spec] = {
     "note": Spec("note", {
         **COMMON,
         "section": F(tables(SECTION), "the text, in sections", True),
+    }),
+    "report": Spec("report", {
+        **COMMON,
+        "about": F(REF, "the plan it reports on; without it, a report on the project"),
+        "file": F(STR, "the HTML document, beside this file (default: this file's name, .html)"),
     }),
 }
 

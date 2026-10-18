@@ -19,6 +19,7 @@ from .context import Project as Ctx
 from .context import prog, short
 from .errors import WaterriseError
 from . import answers as answers_mod
+from . import central
 from . import check as check_mod
 from . import client
 from . import convert as convert_mod
@@ -26,7 +27,7 @@ from . import folder as folder_mod
 from . import install as install_mod
 from .state import (DONE_STEP, decision_local, decision_state, plan_approval, step_approval,
                     summarize)
-from .types import (CONFIG_FILE, FORMAT, ID_RE, KINDS, NOTES_FOLDER, SCHEMA_FOLDER, STATE_FOLDERS,
+from .types import (CONFIG_FILE, FORMAT, ID_RE, KINDS, NOTES_FOLDER, REPORTS_FOLDER, SCHEMA_FOLDER, STATE_FOLDERS,
                     json_schema, jsonable, new_id)
 
 HERE = Path(__file__).resolve().parent
@@ -43,14 +44,23 @@ def planning_dir(ctx: Ctx) -> Path:
 
 
 def _folder(ctx: Ctx) -> folder_mod.Folder:
-    return folder_mod.read(planning_dir(ctx), ctx.root)
+    return folder_mod.read(planning_dir(ctx), ctx.git_root or ctx.root)
+
+
+def _no_folder_hint(ctx: Ctx) -> str:
+    """What to run where there is no planning folder. A checkout that is not
+    registered may be a fresh clone of a project that plans centrally, and the
+    registry is the only thing that would say so."""
+    if ctx.registered:
+        return f"{prog()} init"
+    return (f"{prog()} init, to plan in this repository; or, if it plans centrally:\n"
+            f"{prog()} projects add {ctx.root} --home central")
 
 
 def _typed(ctx: Ctx) -> folder_mod.Folder:
     f = _folder(ctx)
     if not f.exists:
-        raise WaterriseError(f"no planning folder at {ctx.disp(f.root)}",
-                          hint=f"{prog()} init")
+        raise WaterriseError(f"no planning folder at {ctx.disp(f.root)}", hint=_no_folder_hint(ctx))
     return f
 
 
@@ -62,6 +72,10 @@ def _item(f: folder_mod.Folder, item_id: str) -> folder_mod.Item:
                           hint=("did you mean: " + ", ".join(near)) if near else
                           f"{prog()} list")
     return it
+
+
+def _html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _schema_ref(item_path: Path, root: Path) -> str:
@@ -151,7 +165,7 @@ def cmd_new(ctx: Ctx, args) -> int:
     if not NAME_RE.match(args.name):
         raise WaterriseError(f"name {args.name!r}: use lowercase letters, digits and dashes",
                           hint="the name is the file's; the id is made for you")
-    folder = args.folder or (NOTES_FOLDER if args.kind == "note" else "draft")
+    folder = args.folder or {"note": NOTES_FOLDER, "report": REPORTS_FOLDER}.get(args.kind, "draft")
     allowed = check_mod.ALLOWED[args.kind]
     if folder not in allowed:
         raise WaterriseError(f"a {args.kind} lives in {', '.join(allowed)}, not {folder}/")
@@ -165,11 +179,18 @@ def cmd_new(ctx: Ctx, args) -> int:
     text = (text.replace("{id}", item_id).replace("{title}", title.replace('"', '\\"'))
             .replace("{today}", _dt.date.today().isoformat())
             .replace("{schema}", _schema_ref(path, f.root)))
+    doc = path.with_suffix(".html")
+    if args.kind == "report" and doc.exists():
+        raise WaterriseError(f"{ctx.disp(doc)} exists")
     if ctx.would(f"write {ctx.disp(path)} ({item_id})"):
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
     ui.ok(item_id, ctx.disp(path))
+    if args.kind == "report":
+        # The document beside the sidecar: a starting point that passes check.
+        doc.write_text((HERE / "templates" / "report.html").read_text().replace("{title}", _html(title)))
+        ui.ok("and", ctx.disp(doc))
     ui.note(f"fill it in, then: {prog()} check")
     return 0
 
@@ -323,7 +344,7 @@ def _folders_for(ctx: Ctx, everywhere: bool) -> list[tuple[str, folder_mod.Folde
     for r in client.registry():
         planning = Path(r.get("planning") or Path(r["path"]) / "planning")
         if planning.is_dir():
-            out.append((r.get("slug") or r.get("name") or r["path"], folder_mod.read(planning, Path(r["path"]))))
+            out.append((r.get("slug") or r.get("name") or r["path"], folder_mod.read(planning, central.git_root(r))))
     if not out:
         raise WaterriseError("no repository is registered", hint=f"{prog()} serve (in each)")
     return out
@@ -570,16 +591,16 @@ def cmd_convert(ctx: Ctx, args) -> int:
 def cmd_serve(ctx: Ctx, args) -> int:
     root = planning_dir(ctx)
     if not root.is_dir():
-        raise WaterriseError(f"no planning folder at {ctx.disp(root)}", hint=f"{prog()} init")
+        raise WaterriseError(f"no planning folder at {ctx.disp(root)}", hint=_no_folder_hint(ctx))
     if ctx.would(f"make sure the planning service runs, and register {ctx.root}"):
         return 0
     running, what = client.ensure(args.port)
-    entry = client.register(running, ctx.root, root, ctx.name)
+    entry = client.register(running, ctx.root, root, ctx.name, home=ctx.home)
     url = f"http://127.0.0.1:{running.port}/r/{entry['slug']}/"
     if what != "running":
         ui.ok(f"planning service {what}", f"port {running.port}, {running.version}")
     ui.ok(ctx.name, url)
-    f = folder_mod.read(root, ctx.root)
+    f = folder_mod.read(root, ctx.git_root or ctx.root)
     waiting = [(it, summarize(it, f.answers(it.id), plan_approval_required=f.plan_approval, ids=f.by_id()))
                for it in f.items if it.parsed and it.id]
     for it, s in waiting:
@@ -660,6 +681,93 @@ def cmd_forget(ctx: Ctx, args) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# projects
+# --------------------------------------------------------------------------- #
+
+def cmd_projects(ctx: Ctx, args) -> int:
+    action = args.action or "list"
+    if action == "list":
+        rows = client.registry()
+        if args.json:
+            _print_json(rows)
+            return 0
+        if not rows:
+            ui.ok("no project is registered", f"({prog()} serve, or {prog()} projects add, in each)")
+            return 0
+        for r in rows:
+            gone = "" if Path(r["path"]).exists() else "  (missing)"
+            home = r.get("home") or "repo"
+            where = r.get("planning") if home == "central" else ""
+            ui.plain(f"{r.get('slug'):28} {home:8} {r['path']}{gone}" + (ui.dim(f"  plans in {where}") if where else ""))
+        return 0
+    if action == "add":
+        path = Path(args.path or ctx.root).expanduser().resolve()
+        if not path.is_dir():
+            raise WaterriseError(f"no such directory: {path}")
+        home = args.home or "repo"
+        if home == "repo" and not (path / "planning").is_dir():
+            raise WaterriseError(f"{path} has no planning/ to register",
+                                 hint=f"{prog()} init there first, or --home central")
+        name = args.name or (ctx.name if path == ctx.root else path.name)
+        if ctx.would(f"register {path} ({home})"):
+            return 0
+        running, _ = client.ensure(args.port)
+        entry = client.register(running, path, path / "planning", name, home=home)
+        planning = Path(entry["planning"])
+        if home == "central" and not (planning / "planning.toml").exists():
+            sub = Ctx(root=path, planning=planning, name=name, home="central", slug=entry["slug"],
+                      git_root=central.root())
+            cmd_init(sub, args)
+            central.commit(entry["slug"], f"{entry['slug']}: a typed planning folder")
+        ui.ok(entry["slug"], f"{home}: {ctx.disp(planning) if home == 'repo' else planning}")
+        return 0
+    if action == "home":
+        return _projects_home(ctx, args)
+    if action == "remove":
+        target = args.path or str(ctx.root)
+        entry = next((r for r in client.registry() if r.get("slug") == target), None)
+        args.path = entry["path"] if entry else target
+        return cmd_forget(ctx, args)
+    raise WaterriseError(f"unknown action {action}")
+
+
+def _projects_home(ctx: Ctx, args) -> int:
+    """`projects home [SLUG|PATH] repo|central`: carry the folder to the other home."""
+    if args.to is None and args.path in central.HOMES:
+        args.path, args.to = None, args.path        # `projects home central`, for this project
+    if args.to not in central.HOMES:
+        raise WaterriseError("say where to: projects home [SLUG|PATH] repo|central")
+    rows = client.registry()
+    want = args.path or str(ctx.root)
+    entry = next((r for r in rows if r.get("slug") == want), None) or \
+        next((r for r in rows if Path(r["path"]) == Path(want).expanduser().resolve()), None)
+    if entry is None:
+        raise WaterriseError(f"{want} is not a registered project", hint=f"{prog()} projects add")
+    have = entry.get("home") or "repo"
+    if have == args.to:
+        ui.ok(entry["slug"], f"already plans in its {'repository' if have == 'repo' else 'central home'}")
+        return 0
+    root = Path(entry["path"])
+    env_dir = os.environ.get("WATERRISE_PLANNING_DIR") if root == ctx.root else None
+    back = root / (env_dir or "planning")
+    target = central.planning_for(entry["slug"]) if args.to == "central" else back
+    if ctx.would(f"move {entry['planning']} to {target}"):
+        return 0
+    running, _ = client.ensure(args.port)
+    try:
+        dst = central.move_home(entry, args.to, back,
+                                lambda home, planning: client.set_home(running, entry["slug"], home, planning))
+    except (central.Busy, FileExistsError, FileNotFoundError) as e:
+        raise WaterriseError(str(e)) from None
+    ui.ok(entry["slug"], f"plans in {'its repository' if args.to == 'repo' else 'the central home'}: {dst}")
+    if args.to == "central":
+        ui.plain(ui.dim(f"committed in {root} (the folder's removal) and in {central.root()}"))
+    else:
+        ui.plain(ui.dim(f"committed in {root} (the folder) and in {central.root()} (its removal)"))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # the tree
 # --------------------------------------------------------------------------- #
 
@@ -669,11 +777,11 @@ def nodes() -> list[Node]:
         Node("init", "make planning/ a typed planning folder (planning.toml, the folders, the schema)",
              func=cmd_init),
         Node("new", "a new item with a fresh id, from its kind's template",
-             args=[arg("kind", choices=KINDS, help="plan, decision, review or note"),
+             args=[arg("kind", choices=KINDS, help="plan, decision, review, note or report"),
                    arg("name", help="the file's name: lowercase words with dashes"),
                    arg("--title", help="the item's title (default: from the name)"),
-                   arg("--folder", choices=(*STATE_FOLDERS, NOTES_FOLDER),
-                       help="where (default: draft/, notes/ for a note)")],
+                   arg("--folder", choices=(*STATE_FOLDERS, NOTES_FOLDER, REPORTS_FOLDER),
+                       help="where (default: draft/; notes/ for a note, reports/ for a report)")],
              func=cmd_new),
         Node("check", "validate the whole planning folder (exit 1 on an error)",
              args=[arg("--strict", action="store_true", help="count warnings as errors"),
@@ -717,6 +825,16 @@ def nodes() -> list[Node]:
              func=cmd_service),
         Node("forget", "unregister a repository (default: this one)",
              args=[arg("path", nargs="?")], func=cmd_forget),
+        Node("projects", "the registered projects and where each plans: list, add, remove, home",
+             args=[arg("action", nargs="?", choices=("list", "add", "remove", "home")),
+                   arg("path", nargs="?", help="the project (default: this one); for remove and home, its slug too"),
+                   arg("to", nargs="?", metavar="HOME", help="for home: repo or central"),
+                   arg("--home", choices=central.HOMES,
+                       help="where its plans live: repo (<project>/planning/) or central (default repo)"),
+                   arg("--name", help="its name in the pages (default: butler.toml's, or the directory's)"),
+                   arg("--port", type=int, help="where the service is, or starts"),
+                   json_flag],
+             func=cmd_projects),
         Node("install", "install this checkout into waterrise's own venv, with a launcher on PATH",
              args=[arg("--from", dest="from_", metavar="CHECKOUT",
                        help="the checkout (default: the one this runs from, else the last one)"),

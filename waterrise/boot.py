@@ -109,9 +109,11 @@ def restart_if_older(ctx: Project, version: str) -> None:
     if not active():
         return
     running = client.find()
-    have = running.version.split("-")[0] if running else ""
+    if running is None:
+        return                          # starting, or just restarted: nothing to compare
+    have = running.version.split("-")[0]
     try:
-        newer = bool(running and have) and parse(have) >= parse(version)
+        newer = parse(have) >= parse(version)
     except WaterriseError:
         newer = False                   # a pre-calendar version: older
     if newer:
@@ -119,7 +121,7 @@ def restart_if_older(ctx: Project, version: str) -> None:
     if ctx.would(f"restart {UNIT} for {version}"):
         return
     systemctl("restart", UNIT)
-    ui.ok("restarted", f"{UNIT}: {have or 'not answering'} → {version}")
+    ui.ok("restarted", f"{UNIT}: {have} → {version}")
 
 
 def disable(ctx: Project) -> None:

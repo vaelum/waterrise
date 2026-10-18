@@ -381,3 +381,30 @@ def test_the_server_answers_plan_status_with_no_butler_on_the_path(tmp_path):
     text = replies[3]["result"]["content"][0]["text"]
     assert replies[3]["result"]["isError"] is False, text
     assert "p-abc123" in text and "A plan" in text
+
+
+def test_a_central_project_resolves_by_file_id_and_repo_id(tmp_path, monkeypatch):
+    """Its plans are in the central repository, not under its root (s4-3)."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    subprocess.run(["git", "init", "-q", str(proj)], check=True)
+    plans = tmp_path / "data" / "waterrise" / "plans"
+    planning = plans / "proj" / "planning"
+    (planning / "draft").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(plans)], check=True)
+    (planning / "planning.toml").write_text("format = 1\n")
+    plan_file = planning / "draft" / "a.toml"
+    plan_file.write_text('kind = "plan"\nid = "p-abc123"\ntitle = "A"\nsummary = "s"\n'
+                         'created = 2026-10-18\nupdated = 2026-10-18\nwhy = "w"\n')
+    state = tmp_path / "state"
+    (state / "waterrise").mkdir(parents=True)
+    (state / "waterrise" / "registry.json").write_text(json.dumps({"repos": [
+        {"name": "proj", "path": str(proj), "planning": str(planning), "slug": "proj", "home": "central"}]}))
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("WATERRISE", str(REPO))
+    want = workplan.Plan(repo=proj, id="p-abc123")
+    assert workplan.resolve(str(plan_file)) == want
+    assert workplan.resolve("proj:p-abc123") == want
+    assert workplan.resolve("p-abc123") == want
+    assert workplan.status(want)["file"] == "draft/a.toml"

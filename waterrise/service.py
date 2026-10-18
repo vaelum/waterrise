@@ -11,6 +11,10 @@ Pages (one shell, rendered by app.js):
     /r/<slug>/i/<id>       one item, interactive
     /r/<slug>/m/<path>     a Markdown file under planning/, read-only
     /r/<slug>/f/<path>     any file under planning/, as is (sandboxed)
+    /r/<slug>/<id>/report.html
+                           a report's document, for the frame on its page: its
+                           own scripts run, with an opaque origin and nothing
+                           remote, so it cannot reach this service or the token
 
 API (JSON):
 
@@ -26,7 +30,11 @@ API (JSON):
                                           and a stream per tab would use them up
     POST   /api/shutdown                          token
     GET    /api/repos
-    POST   /api/repos                             token: register {path, planning, name}
+    POST   /api/repos                             token: register {path, planning, name, home?};
+                                                  a central project's planning is placed
+                                                  in the central repository
+    PUT    /api/repos/<slug>/home                 token: {home, planning}, after `projects home`
+                                                  has carried the folder there
     DELETE /api/repos/<slug>                      token, or the header if the path is gone
     GET    /api/r/<slug>                          the repository's items, in lane order,
                                           with what each plan needs and is needed by
@@ -78,6 +86,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from . import answers as answers_mod
+from . import central
 from . import check as check_mod
 from . import folder as folder_mod
 from .client import API, HEADER, SERVICE
@@ -89,6 +98,14 @@ ASSETS = ("app.css", "app.js", "events.js", "marked.min.js", "marked.LICENSE.md"
 MAX_BODY = 256 * 1024
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+# A report's document (report-scripts, amos, 2026-10-18: scripts allowed,
+# sandboxed). `sandbox allow-scripts` without allow-same-origin gives it an
+# opaque origin wherever it is opened, framed by the page or on its own;
+# `default-src 'none'` leaves it no fetch, no remote script, style, font or
+# image, and no way to send anything out; only the page may frame it.
+REPORT_CSP = ("sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; "
+              "style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; "
+              "base-uri 'none'; form-action 'none'; frame-ancestors 'self'")
 
 
 def _version() -> str:
@@ -121,12 +138,20 @@ class Registry:
     def by_slug(self, slug: str) -> dict | None:
         return next((r for r in self.repos if r.get("slug") == slug), None)
 
-    def register(self, path: str, planning: str, name: str) -> dict:
+    def register(self, path: str, planning: str, name: str, home: str | None = None) -> dict:
+        """Register a project, or update its planning folder. A project keeps
+        its home: moving it between homes is `projects home`, not this."""
         repo = Path(path).resolve()
         with self.lock:
             for r in self.repos:
                 if Path(r["path"]) == repo:
-                    r["planning"] = planning
+                    have = r.get("home") or "repo"
+                    if home and home != have:
+                        raise HomeConflict(f"{r['slug']} plans in its {'repository' if have == 'repo' else 'central home'}"
+                                           f" already")
+                    if have == "repo":
+                        r["planning"] = planning
+                    r.setdefault("home", have)
                     self.save()
                     return r
             base = re.sub(r"[^a-z0-9-]+", "-", (name or repo.name).lower()).strip("-") or "repo"
@@ -138,9 +163,22 @@ class Registry:
             while slug in taken:
                 slug = f"{base}-{n}"
                 n += 1
+            home = home or "repo"
+            if home == "central":
+                central.ensure()
+                planning = str(central.planning_for(slug))
             entry = {"path": str(repo), "planning": planning, "name": name or repo.name, "slug": slug,
-                     "home": "repo", "common": _git_common(repo), "added": answers_mod.now()}
+                     "home": home, "common": _git_common(repo), "added": answers_mod.now()}
             self.repos.append(entry)
+            self.save()
+            return entry
+
+    def set_home(self, slug: str, home: str, planning: str) -> dict | None:
+        with self.lock:
+            entry = self.by_slug(slug)
+            if entry is None:
+                return None
+            entry["home"], entry["planning"] = home, planning
             self.save()
             return entry
 
@@ -152,6 +190,10 @@ class Registry:
                 self.save()
                 return True
             return False
+
+
+class HomeConflict(Exception):
+    """A registration that would change a project's home."""
 
 
 def _git_common(repo: Path) -> str:
@@ -180,13 +222,14 @@ def _branch(repo: Path) -> str:
 # --------------------------------------------------------------------------- #
 
 def _folder(entry: dict) -> folder_mod.Folder:
-    return folder_mod.read(Path(entry["planning"]), Path(entry["path"]))
+    return folder_mod.read(Path(entry["planning"]), central.git_root(entry))
 
 
 def repo_view(entry: dict, *, deep: bool = True) -> dict:
     missing = not Path(entry["planning"]).is_dir()
     out = {"slug": entry["slug"], "name": entry.get("name"), "path": entry["path"],
-           "common": entry.get("common"), "missing": missing}
+           "common": entry.get("common"), "missing": missing, "home": entry.get("home") or "repo",
+           "planning": entry["planning"]}
     if missing:
         return out
     f = _folder(entry)
@@ -216,6 +259,8 @@ def repo_view(entry: dict, *, deep: bool = True) -> dict:
                                "folder": target.folder if target else None,
                                "done": satisfied(ref, it, ids)})
         s["needed_by"] = list(dict.fromkeys(needed_by.get(it.id, [])))
+        if it.kind == "report":
+            s["about"] = str(it.data.get("about") or "").split("/")[0] or None
         # The lanes it may be dragged to, and why not the others: the same
         # rules `planning move` checks, so the page can refuse a drop up front.
         if it.folder in STATE_FOLDERS:
@@ -267,6 +312,18 @@ def item_view(entry: dict, item_id: str) -> dict | None:
         "problems": [x.as_json() for x in check_mod.run(f, git=False).findings
                      if x.file in (it.rel, f"answers/{it.id}.json") and x.level != "info"],
     }
+    if it.kind == "plan":
+        view["reports"] = [{"id": r.id, "title": r.title, "summary": r.data.get("summary", ""),
+                            "updated": jsonable(r.data.get("updated"))}
+                           for r in f.items if r.parsed and r.kind == "report"
+                           and str(r.data.get("about") or "").split("/")[0] == it.id]
+    if it.kind == "report":
+        doc = check_mod.report_document(it)
+        version = int(doc.stat().st_mtime) if doc.is_file() else 0
+        view["document"] = f"/r/{entry['slug']}/{it.id}/report.html?v={version}"
+        about = str(it.data.get("about") or "").split("/")[0]
+        target = f.get(about) if about else None
+        view["about"] = {"id": target.id, "title": target.title} if target else None
     if it.kind == "plan":
         pa = plan_approval(it, ans)
         view["plan_approval"] = jsonable({k: getattr(pa, k) for k in
@@ -414,6 +471,8 @@ class Handler(BaseHTTPRequestHandler):
             return None
         if parts[0] == "r" and len(parts) >= 4 and parts[2] == "f":
             return self._file(parts[1], parts[3:], raw=True)
+        if parts[0] == "r" and len(parts) == 4 and parts[3] == "report.html" and ID_RE.match(parts[2]):
+            return self._report(parts[1], parts[2])
         if parts[0] != "api":
             return self._error(404, "not found")
         api = parts[1:]
@@ -434,7 +493,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not ID_RE.match(api[3]):
                     return self._error(404, "no such item")
                 f = Path(entry["planning"])
-                fold = folder_mod.read(f, Path(entry["path"]))
+                fold = folder_mod.read(f, central.git_root(entry))
                 it = fold.get(api[3])
                 if it is None:
                     return self._error(404, "no such item")
@@ -504,6 +563,21 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             return
 
+    def _report(self, slug: str, item_id: str) -> None:
+        entry = self.registry.by_slug(slug)
+        if entry is None:
+            return self._error(404, "no such repository")
+        f = _folder(entry)
+        it = f.get(item_id)
+        if it is None or it.kind != "report":
+            return self._error(404, "no such report")
+        doc = check_mod.report_document(it).resolve()
+        if not doc.is_relative_to(it.path.parent.resolve()) or not doc.is_file():
+            return self._error(404, "the report's document is missing")
+        return self._send(200, doc.read_bytes(), "text/html; charset=utf-8",
+                          {"Content-Security-Policy": REPORT_CSP, "Referrer-Policy": "no-referrer",
+                           "Cache-Control": "no-store"})
+
     def _file(self, slug: str, rel: list[str], *, raw: bool) -> None:
         entry = self.registry.by_slug(slug)
         if entry is None:
@@ -554,15 +628,35 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             if body is None:
                 return None
-            path, planning = body.get("path"), body.get("planning")
+            path, planning, home = body.get("path"), body.get("planning"), body.get("home")
             if not isinstance(path, str) or not isinstance(planning, str) or not Path(path).is_absolute():
                 return self._error(400, "path and planning must be absolute paths")
-            if not Path(planning).resolve().is_relative_to(Path(path).resolve()):
+            if home is not None and home not in central.HOMES:
+                return self._error(400, f"home must be one of {', '.join(central.HOMES)}")
+            known = next((r for r in self.registry.repos if Path(r["path"]) == Path(path).resolve()), None)
+            if (home or (known or {}).get("home") or "repo") == "repo" and \
+                    not Path(planning).resolve().is_relative_to(Path(path).resolve()):
                 return self._error(400, "the planning folder must be inside the repository")
             if not Path(path).is_dir():
                 return self._error(400, "no such directory")
-            return self._json(200, self.registry.register(path, str(Path(planning).resolve()),
-                                                          str(body.get("name") or "")))
+            try:
+                return self._json(200, self.registry.register(path, str(Path(planning).resolve()),
+                                                              str(body.get("name") or ""), home))
+            except HomeConflict as e:
+                return self._error(409, str(e))
+        if len(api) == 3 and api[0] == "repos" and api[2] == "home" and method == "PUT":
+            if not self._authorized():
+                return self._error(403, "a project's home is changed by `waterrise projects home`")
+            body = self._body()
+            if body is None:
+                return None
+            home, planning = body.get("home"), body.get("planning")
+            if home not in central.HOMES or not isinstance(planning, str) or not Path(planning).is_absolute():
+                return self._error(400, f"home must be one of {', '.join(central.HOMES)}, planning an absolute path")
+            entry = self.registry.set_home(api[1], home, str(Path(planning).resolve()))
+            if entry is None:
+                return self._error(404, "no such repository")
+            return self._json(200, entry)
         if len(api) == 2 and api[0] == "repos" and method == "DELETE":
             entry = self.registry.by_slug(api[1])
             if entry is None:
@@ -579,11 +673,17 @@ class Handler(BaseHTTPRequestHandler):
             body = self._body()
             if body is None:
                 return None
-            if api[2] == "order" and method == "PUT" and len(api) == 4:
-                return self._order_write(entry, api[3], body)
-            if api[2] == "move" and method == "PUT" and len(api) == 4:
-                return self._move(entry, api[3], body)
-            return self._item_write(entry, method, api[2], api[3], api[4] if len(api) > 4 else None, body)
+            try:
+                if api[2] == "order" and method == "PUT" and len(api) == 4:
+                    return self._order_write(entry, api[3], body)
+                if api[2] == "move" and method == "PUT" and len(api) == 4:
+                    return self._move(entry, api[3], body)
+                return self._item_write(entry, method, api[2], api[3], api[4] if len(api) > 4 else None, body)
+            finally:
+                # The central repository is the record of a central project's
+                # answers; a click is committed like any command.
+                if central.is_central(entry):
+                    central.commit(entry["slug"], f"{entry['slug']}: {api[2]} {'/'.join(api[3:])} (the page)")
         return self._error(404, "not found")
 
     def _order_write(self, entry: dict, folder: str, body: dict) -> None:

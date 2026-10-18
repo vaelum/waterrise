@@ -293,11 +293,23 @@ def ensure(port: int | None = None) -> tuple[Running, str]:
         fh.close()
 
 
-def register(running: Running, repo: Path, planning: Path, name: str) -> dict:
-    status, body = call(running.port, "POST", "/api/repos",
-                        {"path": str(repo), "planning": str(planning), "name": name}, auth=True)
+def register(running: Running, repo: Path, planning: Path, name: str, home: str | None = None) -> dict:
+    """Register (or update) a project. A central project's planning folder is
+    the service's to place, in the central repository."""
+    body = {"path": str(repo), "planning": str(planning), "name": name}
+    if home:
+        body["home"] = home
+    status, body = call(running.port, "POST", "/api/repos", body, auth=True)
     if status != 200 or not isinstance(body, dict):
         raise WaterriseError(f"the planning service refused to register {repo}: {body}")
+    return body
+
+
+def set_home(running: Running, slug: str, home: str, planning: Path) -> dict:
+    status, body = call(running.port, "PUT", f"/api/repos/{slug}/home",
+                        {"home": home, "planning": str(planning)}, auth=True)
+    if status != 200 or not isinstance(body, dict):
+        raise WaterriseError(f"the planning service refused to move {slug} to {home}: {body}")
     return body
 
 

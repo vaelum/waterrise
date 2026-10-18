@@ -128,7 +128,12 @@ def resolve(spec: str, cwd: Path | None = None) -> Plan:
         as_path = cwd / as_path
     if spec.endswith(".toml") and as_path.is_file():
         item_id = _item_id(as_path)
-        repo = _git_toplevel(as_path.parent)
+        # A central project's file lives in the central repository: its
+        # project is the registry entry whose folder holds it, not that
+        # repository's toplevel.
+        here = as_path.resolve()
+        owner = next((e for e in known_repos(cwd) if e[2].resolve() in here.parents), None)
+        repo = owner[1] if owner else _git_toplevel(as_path.parent)
         if not item_id or repo is None:
             raise PlanError(f"{as_path} is not a planning item inside a git repository")
         return Plan(repo=repo, id=item_id)

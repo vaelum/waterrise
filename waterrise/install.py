@@ -248,8 +248,9 @@ def cmd_install(ctx: Project, args) -> int:
         ui.warn("note:", f"{launcher().parent} is not on PATH; add it, or run {launcher()}")
     if args.boot:
         boot.enable(ctx, venv_script())
-    else:
-        boot.restart_if_older(ctx, version)
+    # Whether or not --boot wrote the unit just now: an unchanged unit is not
+    # restarted by enable, and its service may still be the older version.
+    boot.restart_if_older(ctx, version)
     return 0
 
 

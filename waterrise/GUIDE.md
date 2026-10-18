@@ -21,6 +21,7 @@ planning/
   in-progress/    being worked on
   done/           finished, kept as the record
   notes/          context several items share; notes have no state
+  reports/        HTML reports and their sidecars (`<name>.toml` + `<name>.html`); no state
   answers/        <id>.json: the user's answers and approvals — never yours to write
   .schema/        the JSON Schema editors validate against (`waterrise schema`)
   .gitignore      keeps the answers' lock files out of git (`waterrise init` writes it)
@@ -29,8 +30,8 @@ planning/
 - **The folder is the state.** Move an item with
   `waterrise move <id> <folder>`, which checks the target
   folder's rules first and then runs `git mv`.
-- **Each item is one TOML file** with a `kind`: `plan`, `decision`, `review`
-  or `note`. The file name is a readable slug and may change.
+- **Each item is one TOML file** with a `kind`: `plan`, `decision`, `review`,
+  `note` or `report`. The file name is a readable slug and may change.
 - **The `id` is the identity** and never changes: `p-3p758x` is the kind's
   letter and six base32 characters. `waterrise new` makes it; never invent,
   edit or reuse one. The answers file, the page's URL and every reference
@@ -50,10 +51,25 @@ planning/
 | one question for the user that no plan owns, or a settled choice that must not be reopened (`final = true`) | `decision` |
 | findings of a review or an audit, to be triaged and handed to plans | `review` |
 | context several items read first: ground rules, a data model, research | `note` |
+| what you measured, compared or investigated, with numbers, tables or charts | `report` |
 
-`waterrise new plan <name>` (or `decision`, `review`,
-`note`) writes the item from its template with a fresh id. Fill it in, then
-run `waterrise check`.
+`waterrise new plan <name>` (or `decision`, `review`, `note`, `report`)
+writes the item from its template with a fresh id. Fill it in, then run
+`waterrise check`.
+
+**Reports.** When the findings are numbers, a chart, a table to sort, or
+anything longer than a `[[section]]` should be, write a report instead of
+prose in a plan. `waterrise new report <name>` makes the pair in `reports/`:
+the sidecar (`h-…`, its title and summary, and `about = "p-…"` for the plan it
+reports on, or nothing for one about the project) and a starter document that
+passes `check`. The document is one HTML file with everything inline: its
+CSS, its script, its data and its images (inline SVG or `data:` URLs). The
+page shows it in a sandboxed frame that loads nothing remote, so a CDN script,
+a web font or a remote image would not load, and `check` refuses them; a
+plain link is fine. Keep to the light and dark tokens of the starter, label
+every axis, and put the answer before the numbers. Never a credential in a
+report: `check` looks for them. A report is read-only in the page; the user
+comments on it through its sidecar like on any item.
 
 ## 3. Writing TOML that stays valid
 
@@ -203,11 +219,24 @@ what waits on the user and what waits on you.
 | `waterrise resolve ID COMMENT --note TEXT` | mark a comment handled |
 | `waterrise convert FILE` | a skeleton from a Markdown plan or an old HTML form |
 | `waterrise serve [--open]` | start or join the local service, register this repository, print the URL |
-| `waterrise service [status\|stop\|restart\|logs]` | the service itself |
+| `waterrise service [status\|stop\|restart\|logs\|run]` | the service itself |
+| `waterrise projects [list\|add\|remove] [PATH] [--home repo\|central]` | the registered projects, and where each plans |
+| `waterrise install [--check VERSION] [--boot\|--no-boot] [--uninstall]` | waterrise itself |
 
 The service is one process per user for every repository, on
 `127.0.0.1:8765` (`WATERRISE_PORT` changes it). Its state is in
 `$XDG_STATE_HOME/waterrise/`.
+
+**Two homes.** A project keeps its `planning/` in its own repository (`repo`,
+the default) or in the central repository,
+`$XDG_DATA_HOME/waterrise/plans/<slug>/planning/` (`central`), for a
+repository whose plans must not be in it, or something that is no repository
+at all. The home is in the registry only (`waterrise projects`), so a fresh
+clone of a central project has no `planning/` and is told to register it;
+never `init` one there. Every command works the same in both homes. In a
+central project, waterrise commits the folder in the central repository after
+every command that writes it, `check` included, and after every click in the
+page; you commit nothing there yourself.
 
 ## 10. Before handing a draft to the user
 
@@ -234,7 +263,7 @@ The service is one process per user for every repository, on
 
 | key | type | required | meaning |
 |---|---|---|---|
-| `kind` | `"plan"` \| `"decision"` \| `"review"` \| `"note"` | yes | what the file is; must match the id's letter |
+| `kind` | `"plan"` \| `"decision"` \| `"review"` \| `"note"` \| `"report"` | yes | what the file is; must match the id's letter |
 | `id` | string | yes | `<letter>-<six base32>`, made by `waterrise new`; never changes |
 | `title` | string | yes | the item's name |
 | `summary` | string | yes | one or two sentences, shown on cards |
@@ -289,6 +318,13 @@ The service is one process per user for every repository, on
 | key | type | required | meaning |
 |---|---|---|---|
 | `section` | `[[section]]` | yes | the text, in sections |
+
+#### `kind = "report"`
+
+| key | type | required | meaning |
+|---|---|---|---|
+| `about` | reference |  | the plan it reports on; without it, a report on the project |
+| `file` | string |  | the HTML document, beside this file (default: this file's name, .html) |
 
 #### `[[decision]]` in a plan
 

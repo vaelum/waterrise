@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import answers as answers_mod
-from .types import (ANSWERS_FOLDER, CONFIG_FILE, NOTES_FOLDER, SCHEMA_FOLDER, STATE_FOLDERS,
+from .types import (ANSWERS_FOLDER, CONFIG_FILE, NOTES_FOLDER, REPORTS_FOLDER, SCHEMA_FOLDER, STATE_FOLDERS,
                     Problem, load, load_config)
 
 _TOML_LINE = re.compile(r"\(at line (\d+), column (\d+)\)")
@@ -128,6 +128,7 @@ class Folder:
     legacy: list[str] = field(default_factory=list)    # Markdown plans, relative
     forms: list[str] = field(default_factory=list)     # the prototype's HTML forms
     stray: list[str] = field(default_factory=list)
+    report_files: list[str] = field(default_factory=list)  # reports/ files that are no item
     answer_files: dict[str, Path] = field(default_factory=dict)
 
     @property
@@ -240,13 +241,17 @@ def read(root: Path, repo: Path | None = None) -> Folder:
             for a in sorted(entry.glob("*.json")):
                 f.answer_files[a.stem] = a
             continue
-        if entry.is_dir() and name in (*STATE_FOLDERS, NOTES_FOLDER):
+        if entry.is_dir() and name in (*STATE_FOLDERS, NOTES_FOLDER, REPORTS_FOLDER):
             for p in sorted(entry.rglob("*")):
                 if not p.is_file() or p.name.startswith("."):
                     continue
                 rel = p.relative_to(root).as_posix()
                 if p.suffix == ".toml":
                     f.items.append(_parse_item(p, root, name))
+                elif name == REPORTS_FOLDER:
+                    # A report's document, and anything it ships beside it;
+                    # check pairs them with their sidecars.
+                    f.report_files.append(rel)
                 elif p.suffix == ".md":
                     f.legacy.append(rel)
                 elif p.suffix == ".html" or p.name.endswith(".answers.json"):
