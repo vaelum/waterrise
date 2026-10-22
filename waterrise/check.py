@@ -208,7 +208,8 @@ def _ids_at_head(folder: Folder) -> dict[str, str] | None:
         return None
     try:
         names = subprocess.run(["git", "-C", str(folder.repo), "ls-tree", "-r", "--name-only", "HEAD",
-                                "--", rel], capture_output=True, text=True, timeout=10)
+                                "--", rel], capture_output=True, text=True, timeout=10, encoding="utf-8",
+                                stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if names.returncode != 0:
@@ -218,7 +219,8 @@ def _ids_at_head(folder: Folder) -> dict[str, str] | None:
         if not name.endswith(".toml") or name.endswith("/planning.toml") or name == "planning.toml":
             continue
         shown = subprocess.run(["git", "-C", str(folder.repo), "show", f"HEAD:{name}"],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, encoding="utf-8",
+                               stdin=subprocess.DEVNULL)
         if shown.returncode != 0:
             continue
         m = _ID_LINE.search(shown.stdout)

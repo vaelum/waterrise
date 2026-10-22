@@ -1,7 +1,18 @@
-"""`waterrise install --boot`: a systemd user unit that runs the service at login.
+"""`waterrise install --boot`: the service at login.
+
+On Linux, a systemd user unit:
 
     ~/.config/systemd/user/waterrise.service
         ExecStart=<venv>/bin/waterrise service run
+
+On Windows, a value in the current user's Run key (no administrator needed),
+with the venv's pythonw.exe so no console window opens:
+
+    HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\\waterrise
+        "<venv>\\Scripts\\pythonw.exe" -P -m waterrise service run
+
+Nothing restarts it there if it dies; `serve`, and every command that needs
+the service, starts it again.
 
 `service run` is the same service `serve` starts detached, in the foreground,
 so systemd owns the process. `serve` run while it is up finds it and registers
@@ -16,7 +27,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import ui
+from . import dirs, ui, windows
 from .context import Project
 from .errors import WaterriseError
 
@@ -52,7 +63,8 @@ WantedBy=default.target
 def systemctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     if shutil.which("systemctl") is None:
         raise WaterriseError("systemctl not found: --boot needs systemd's user manager")
-    out = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+    out = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, encoding="utf-8",
+                         stdin=subprocess.DEVNULL)
     if check and out.returncode != 0:
         raise WaterriseError(f"systemctl --user {' '.join(args)} failed",
                              hint=(out.stderr or out.stdout).strip() or None)
@@ -60,11 +72,85 @@ def systemctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
 
 
 def installed() -> bool:
+    if dirs.WINDOWS:
+        return windows.run_command() is not None
     return unit_path().exists()
 
 
 def active() -> bool:
+    if dirs.WINDOWS:
+        from . import client
+        return installed() and client.find() is not None
     return installed() and systemctl("is-active", "--quiet", UNIT, check=False).returncode == 0
+
+
+# --------------------------------------------------------------------------- #
+# Windows: the Run value
+# --------------------------------------------------------------------------- #
+
+RUN_KEY_SHOWN = rf"HKCU\{windows.RUN_KEY}\{windows.RUN_NAME}"
+
+
+def run_argv(executable: Path) -> list[str]:
+    """What login runs: the venv's pythonw beside `executable` (its waterrise.exe)."""
+    argv = [str(executable.with_name("pythonw.exe")), "-P", "-m", "waterrise", "service", "run"]
+    if os.environ.get("WATERRISE_PORT"):
+        argv += ["--port", os.environ["WATERRISE_PORT"]]
+    return argv
+
+
+def _launch(argv: list[str]) -> None:
+    """Start what login starts, detached, now."""
+    from . import client
+    subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     close_fds=True, **client._detached())
+
+
+def _enable_windows(ctx: Project, executable: Path) -> None:
+    from . import client
+
+    argv = run_argv(executable)
+    command = subprocess.list2cmdline(argv)
+    changed = windows.run_command() != command
+    if ctx.would(f"write {RUN_KEY_SHOWN} and start the service"):
+        return
+    windows.set_run_command(command)
+    running = client.find()
+    if running and changed:
+        client.stop(running)
+    if changed or not running:
+        _launch(argv)
+    ui.ok("start at login", f"{RUN_KEY_SHOWN}: {command}")
+    carried = [n for n in ("XDG_STATE_HOME", "XDG_DATA_HOME") if os.environ.get(n)]
+    if carried:
+        ui.warn("note:", f"{' and '.join(carried)} are set here, and the service at login sees them only "
+                         "if they are user environment variables (setx), not just this shell's")
+
+
+def _restart_windows(ctx: Project, running, have: str, version: str) -> None:
+    from . import client
+    from .install import venv_script
+
+    if ctx.would(f"restart the service for {version}"):
+        return
+    client.stop(running)
+    _launch(run_argv(venv_script()))
+    ui.ok("restarted", f"the service: {have} → {version}")
+
+
+def _disable_windows(ctx: Project) -> None:
+    from . import client
+
+    if not installed():
+        ui.ok("start at login", "is not set up")
+        return
+    if ctx.would(f"remove {RUN_KEY_SHOWN} and stop the service"):
+        return
+    windows.delete_run_command()
+    running = client.find()
+    if running:
+        client.stop(running)
+    ui.ok("removed", RUN_KEY_SHOWN)
 
 
 def _linger_hint() -> None:
@@ -72,7 +158,7 @@ def _linger_hint() -> None:
     if not user or shutil.which("loginctl") is None:
         return
     out = subprocess.run(["loginctl", "show-user", user, "--property=Linger"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, encoding="utf-8", stdin=subprocess.DEVNULL)
     if out.stdout.strip() == "Linger=no":
         ui.warn("note:", "the service starts at login and stops at logout; to keep it running "
                          f"without a session: loginctl enable-linger {user}")
@@ -82,8 +168,11 @@ def enable(ctx: Project, executable: Path) -> None:
     """Write the unit, and enable and (re)start it."""
     from . import client
 
+    if dirs.WINDOWS:
+        _enable_windows(ctx, executable)
+        return
     path, text = unit_path(), unit_text(executable)
-    changed = not path.exists() or path.read_text() != text
+    changed = not path.exists() or path.read_text(encoding="utf-8") != text
     if ctx.would(f"write {path} and enable --now {UNIT}"):
         return
     # A detached service from `serve` holds the port the unit wants.
@@ -92,7 +181,7 @@ def enable(ctx: Project, executable: Path) -> None:
         client.stop(running)
         ui.ok("stopped", f"the detached service on port {running.port}; the unit takes over")
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
     systemctl("daemon-reload")
     systemctl("enable", UNIT)
     if changed or not active():
@@ -118,6 +207,9 @@ def restart_if_older(ctx: Project, version: str) -> None:
         newer = False                   # a pre-calendar version: older
     if newer:
         return
+    if dirs.WINDOWS:
+        _restart_windows(ctx, running, have, version)
+        return
     if ctx.would(f"restart {UNIT} for {version}"):
         return
     systemctl("restart", UNIT)
@@ -125,6 +217,9 @@ def restart_if_older(ctx: Project, version: str) -> None:
 
 
 def disable(ctx: Project) -> None:
+    if dirs.WINDOWS:
+        _disable_windows(ctx)
+        return
     path = unit_path()
     if not path.exists():
         ui.ok(UNIT, "is not installed")

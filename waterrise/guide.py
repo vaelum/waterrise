@@ -21,10 +21,10 @@ def rendered(text: str) -> str:
 
 
 def main() -> None:
-    text = PATH.read_text()
+    text = PATH.read_text(encoding="utf-8")
     new = rendered(text)
     if new != text:
-        PATH.write_text(new)
+        PATH.write_text(new, encoding="utf-8", newline="\n")
         print(f"updated {PATH}")
     else:
         print(f"{PATH} is current")

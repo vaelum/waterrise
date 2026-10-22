@@ -221,15 +221,16 @@ what waits on the user and what waits on you.
 | `waterrise serve [--open]` | start or join the local service, register this repository, print the URL |
 | `waterrise service [status\|stop\|restart\|logs\|run]` | the service itself |
 | `waterrise projects [list\|add\|remove] [PATH] [--home repo\|central]` | the registered projects, and where each plans |
-| `waterrise install [--check VERSION] [--boot\|--no-boot] [--uninstall]` | waterrise itself |
+| `waterrise install [--check VERSION] [--boot\|--no-boot] [--no-path] [--uninstall]` | waterrise itself |
 
 The service is one process per user for every repository, on
 `127.0.0.1:8765` (`WATERRISE_PORT` changes it). Its state is in
-`$XDG_STATE_HOME/waterrise/`.
+`$XDG_STATE_HOME/waterrise/` (`%LOCALAPPDATA%\waterrise\state\` on Windows).
 
 **Two homes.** A project keeps its `planning/` in its own repository (`repo`,
 the default) or in the central repository,
-`$XDG_DATA_HOME/waterrise/plans/<slug>/planning/` (`central`), for a
+`$XDG_DATA_HOME/waterrise/plans/<slug>/planning/` (`central`;
+`%LOCALAPPDATA%\waterrise\plans\` on Windows), for a
 repository whose plans must not be in it, or something that is no repository
 at all. The home is in the registry only (`waterrise projects`), so a fresh
 clone of a central project has no `planning/` and is told to register it;

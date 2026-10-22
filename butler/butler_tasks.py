@@ -19,6 +19,22 @@ def test(ctx, args):
     return rc
 
 
+@task("windows-test", help="run the suite in the Windows test VM on this machine (tools/windows-vm)",
+      args=[arg("--ref", default="HEAD", help="the commit to test (default HEAD; not uncommitted changes)"),
+            arg("--python", default="3.13,3", help="the Pythons to run it under (default 3.13,3)"),
+            arg("--e2e", action="store_true",
+                help="also install --boot, reboot the VM, and check the service after logon")])
+def windows_test(ctx, args):
+    # The VM is built once with `python3 tools/windows-vm/vm.py build`; each
+    # run starts from its clean snapshot (tools/windows-vm/README.md).
+    argv = ["python3", str(ctx.root / "tools" / "windows-vm" / "vm.py"), "test",
+            "--ref", args.ref, "--python", args.python]
+    rc = ctx.run(argv + (["--e2e"] if args.e2e else []))
+    if rc == 0:
+        ui.ok("tests passed on Windows")
+    return rc
+
+
 def _python(ctx) -> str:
     """The project's dev venv if it has one, else whatever is on PATH."""
     venv = ctx.root / ".venv" / "bin" / "python"

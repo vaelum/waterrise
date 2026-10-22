@@ -5,3 +5,6 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+# The Windows test VM's files: a symlink to /fast/vms/waterrise-windows/, so
+# mirror-projects copies the link and not the 40 GB (tools/windows-vm/).
+/.windows-vm

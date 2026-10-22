@@ -7,6 +7,46 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.10.4]
+
+### Added
+
+- **waterrise runs on Windows.** `py -3 -m waterrise install` from a plain
+  PowerShell makes the venv without symlinks, writes `waterrise.cmd` into
+  `%LOCALAPPDATA%\waterrise\bin` and puts that folder on the user's PATH
+  (`--no-path` leaves PATH alone). `--boot` starts the service at login from
+  a value in the user's Run key, with `pythonw.exe` and no window; `--no-boot`
+  and `--uninstall` remove it. The service starts detached with no console,
+  and an install restarts an older one. Data and state default to
+  `%LOCALAPPDATA%\waterrise\` and its `state\`; the XDG variables still
+  override them.
+
+### Fixed
+
+- **Answers are no longer lost to concurrent writes on Windows.** The lock
+  between processes was skipped where `fcntl` is missing; all three locks
+  (the answers files, the service start, the central home) now go through
+  `waterrise/lock.py`, with `msvcrt` on Windows, and a platform with neither
+  is an error. Replacing a file retries while another process has it open.
+- **Every file is read and written as UTF-8, and committed files with LF**,
+  whatever the platform's code page; console output that the console can't
+  encode becomes `?` instead of an error.
+- An item's `#:schema` line has forward slashes on Windows too, and the
+  work-plan server matches git's and Python's spelling of the same path;
+  when it can't place a file it says what git said.
+- The tests run in a home of their own (`HOME`, `USERPROFILE`, `LOCALAPPDATA`,
+  `APPDATA`) and can't write into the real one; a test run on Windows did.
+- **Found by running on Windows**: the work-plan server's `git` hung for good
+  behind the server's own stdin, so every process waterrise starts now gets
+  no stdin; its JSON-RPC replies went out in cp1252 before Python 3.15, and
+  the CLI's output into a pipe is UTF-8 now too; `serve` waited in vain for a
+  service whose pid was the venv launcher's; a refused request reset its
+  connection; the service at login, under `pythonw.exe`, ended on its first
+  line for want of a stdout; `service stop` waited for a `service.json` that
+  could not be deleted while it read it; `projects home` deleted lock files it
+  still held; `install --uninstall` through the launcher deleted the venv it
+  ran from.
+
 ## [2026.10.3]
 
 ### Changed

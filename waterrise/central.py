@@ -1,7 +1,8 @@
 """The central home: one git repository for every project that plans outside
 its own (central-home, amos, 2026-10-18).
 
-    $XDG_DATA_HOME/waterrise/plans/          one git repository
+    <data>/plans/                            one git repository (dirs.py:
+                                             $XDG_DATA_HOME/waterrise/plans/)
       <slug>/planning/                       one project's typed folder
 
 A project's home is in waterrise's registry only (mode-record): nothing in
@@ -13,18 +14,18 @@ approved has a history; pushing it somewhere is amos's.
 
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
 
+from . import dirs, lock
+
 HOMES = ("repo", "central")
 
 
 def root() -> Path:
-    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
-    return Path(base) / "waterrise" / "plans"
+    return dirs.data() / "plans"
 
 
 def planning_for(slug: str) -> Path:
@@ -41,7 +42,8 @@ def git_root(entry: dict) -> Path:
 
 
 def _git(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", "-C", str(root()), *args], capture_output=True, text=True, timeout=30)
+    return subprocess.run(["git", "-C", str(root()), *args], capture_output=True, text=True, encoding="utf-8",
+                          timeout=30, stdin=subprocess.DEVNULL)
 
 
 def ensure() -> Path:
@@ -49,12 +51,13 @@ def ensure() -> Path:
     top = root()
     if not (top / ".git").exists():
         top.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "init", "-q", str(top)], check=True, capture_output=True, timeout=30)
+        subprocess.run(["git", "init", "-q", str(top)], check=True, capture_output=True, timeout=30,
+                       stdin=subprocess.DEVNULL)
         (top / "README.md").write_text(
             "# waterrise: the central plans\n\n"
             "One folder per project that plans outside its own repository:\n"
             "`<slug>/planning/`. Written by waterrise, which commits after every\n"
-            "change; `waterrise projects` lists the projects.\n")
+            "change; `waterrise projects` lists the projects.\n", encoding="utf-8", newline="\n")
         commit("", "waterrise: the central plans start here")
     return top
 
@@ -74,7 +77,7 @@ def commit(slug: str, message: str) -> bool:
     if _git("diff", "--cached", "--quiet", "--", where).returncode == 0:
         return False
     out = subprocess.run(["git", *_identity(), "-C", str(root()), "commit", "-q", "-m", message, "--", where],
-                         capture_output=True, text=True, timeout=30)
+                         capture_output=True, text=True, timeout=30, encoding="utf-8", stdin=subprocess.DEVNULL)
     return out.returncode == 0
 
 
@@ -91,38 +94,33 @@ def _all_answer_locks(planning: Path):
     """Every answers file's lock, taken without waiting, for as long as the
     move runs: one the service holds means it is mid-write, and the move is
     refused rather than racing it."""
-    import fcntl
-
     held = []
     try:
         for f in sorted((planning / "answers").glob("*.json")):
-            fh = open(f.parent / f".{f.name}.lock", "a")
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(lock.acquire(f.parent / f".{f.name}.lock", wait=False))
             except BlockingIOError:
-                fh.close()
                 raise Busy(f"the planning service is writing {f.name}; try again") from None
-            held.append(fh)
         yield
     finally:
         for fh in held:
-            fcntl.flock(fh, fcntl.LOCK_UN)
-            fh.close()
+            lock.release(fh)
 
 
 def _tracked(repo: Path, path: Path) -> bool:
     out = subprocess.run(["git", "-C", str(repo), "ls-files", "--", str(path)],
-                         capture_output=True, text=True, timeout=30)
+                         capture_output=True, text=True, timeout=30, encoding="utf-8", stdin=subprocess.DEVNULL)
     return out.returncode == 0 and bool(out.stdout.strip())
 
 
 def _repo_commit(repo: Path, path: Path, message: str) -> None:
     """Commit `path` in the project's own repository, and nothing else in it."""
-    subprocess.run(["git", "-C", str(repo), "add", "-A", "--", str(path)], capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(repo), "add", "-A", "--", str(path)], capture_output=True, timeout=30,
+                   stdin=subprocess.DEVNULL)
     if subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet", "--", str(path)],
-                      timeout=30).returncode != 0:
+                      timeout=30, stdin=subprocess.DEVNULL).returncode != 0:
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", message, "--", str(path)],
-                       check=True, capture_output=True, timeout=30)
+                       check=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
 
 
 def move_home(entry: dict, to: str, repo_planning: Path, set_home) -> Path:
@@ -142,17 +140,34 @@ def move_home(entry: dict, to: str, repo_planning: Path, set_home) -> Path:
         raise FileExistsError(f"{dst} exists and is not empty")
     if to == "central":
         ensure()
+    old = src if to == "central" or src.parent.name != slug else src.parent
+    tracked = to == "central" and _tracked(repo, src)
     with _all_answer_locks(src):
         shutil.copytree(src, dst, ignore=shutil.ignore_patterns(".*.lock"), dirs_exist_ok=True)
         set_home(to, dst)
-        if to == "central":
-            tracked = _tracked(repo, src)
-            shutil.rmtree(src)
-            if tracked:
-                _repo_commit(repo, src, "planning: the plans moved to waterrise's central home")
-            commit(slug, f"{slug}: moved in from {repo}")
-        else:
-            _repo_commit(repo, dst, "planning: the plans back from waterrise's central home")
-            shutil.rmtree(src.parent if src.parent.name == slug else src)
-            commit(slug, f"{slug}: moved back to {repo}")
+        _remove_but_held_locks(old)
+    # The lock files are released now and go with the folder; the commits come
+    # after, so that they record the folder gone, lock files and all.
+    shutil.rmtree(old, ignore_errors=True)
+    if to == "central":
+        if tracked:
+            _repo_commit(repo, src, "planning: the plans moved to waterrise's central home")
+        commit(slug, f"{slug}: moved in from {repo}")
+    else:
+        _repo_commit(repo, dst, "planning: the plans back from waterrise's central home")
+        commit(slug, f"{slug}: moved back to {repo}")
     return dst
+
+
+def _remove_but_held_locks(folder: Path) -> None:
+    """Everything in `folder` but the lock files we hold: Windows won't delete
+    a file that is open (WinError 32), and they are released only after."""
+    for path in sorted(folder.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+        try:
+            if path.is_dir() and not path.is_symlink():
+                path.rmdir()
+            else:
+                path.unlink()
+        except OSError:
+            if not (path.name.startswith(".") and path.name.endswith(".lock")) and not path.is_dir():
+                raise

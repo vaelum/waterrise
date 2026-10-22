@@ -86,7 +86,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from . import answers as answers_mod
-from . import central
+from . import central, dirs, lock
 from . import check as check_mod
 from . import folder as folder_mod
 from .client import API, HEADER, SERVICE
@@ -128,7 +128,7 @@ class Registry:
         self.lock = threading.Lock()
         self.repos: list[dict] = []
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             self.repos = [r for r in data.get("repos", []) if isinstance(r, dict) and r.get("path")]
         except (OSError, ValueError, AttributeError):
             self.repos = []
@@ -201,7 +201,8 @@ def _git_common(repo: Path) -> str:
     """The git common directory, so worktrees group under their main checkout."""
     try:
         out = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute",
-                              "--git-common-dir"], capture_output=True, text=True, timeout=5)
+                              "--git-common-dir"], capture_output=True, text=True, timeout=5, encoding="utf-8",
+                              stdin=subprocess.DEVNULL)
         if out.returncode == 0:
             return out.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
@@ -212,7 +213,7 @@ def _git_common(repo: Path) -> str:
 def _branch(repo: Path) -> str:
     try:
         out = subprocess.run(["git", "-C", str(repo), "branch", "--show-current"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, encoding="utf-8", stdin=subprocess.DEVNULL)
         return out.stdout.strip() if out.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -422,18 +423,24 @@ class Handler(BaseHTTPRequestHandler):
         given = self.headers.get("Authorization", "")
         return secrets.compare_digest(given, f"Bearer {self.token}")
 
-    def _body(self) -> dict | None:
+    def _read_body(self) -> bytes | None:
+        """The request's body, read before anything is answered: on Windows a
+        socket closed with unread data in it is reset, and the client gets a
+        ConnectionAbortedError instead of the answer."""
         try:
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             self._error(400, "bad Content-Length")
             return None
         if length > MAX_BODY:
+            self.close_connection = True
             self._error(413, "body too large")
             return None
-        raw = self.rfile.read(length) if length else b"{}"
+        return self.rfile.read(length) if length > 0 else b""
+
+    def _body(self) -> dict | None:
         try:
-            data = json.loads(raw or b"{}")
+            data = json.loads(self._raw or b"{}")
         except ValueError:
             self._error(400, "not JSON")
             return None
@@ -608,6 +615,9 @@ class Handler(BaseHTTPRequestHandler):
         self._write("DELETE")
 
     def _write(self, method: str) -> None:
+        self._raw = self._read_body()
+        if self._raw is None:
+            return None
         if not self._host_ok():
             return self._error(403, "wrong Host")
         if not self._write_ok():
@@ -880,9 +890,9 @@ def make_server(port: int, state: Path) -> ThreadingHTTPServer:
     state.mkdir(parents=True, exist_ok=True)
     from .client import token as _token
 
-    os.environ["XDG_STATE_HOME"] = str(state.parent)
+    os.environ[dirs.STATE_ENV] = str(state)
     version = _version()
-    shell = (STATIC / "app.html").read_text().replace("{{V}}", version).encode()
+    shell = (STATIC / "app.html").read_text(encoding="utf-8").replace("{{V}}", version).encode()
     handler = type("H", (Handler,), {
         "registry": _registry(state), "port": port, "token": _token(),
         "version": version, "instance": secrets.token_hex(8), "shell": shell,
@@ -908,15 +918,19 @@ def main(argv: list[str]) -> None:
         server.stopping = True
         threading.Thread(target=server.shutdown, daemon=True).start()
 
-    signal.signal(signal.SIGTERM, stop)
+    # SIGTERM from systemd; SIGBREAK is Ctrl+Break in a Windows console. A
+    # detached Windows service gets neither and stops through /api/shutdown.
+    for name in ("SIGTERM", "SIGBREAK"):
+        if hasattr(signal, name):
+            signal.signal(getattr(signal, name), stop)
     try:
         server.serve_forever()
     finally:
         server.server_close()
         try:
-            current = json.loads((state / "service.json").read_text())
+            current = json.loads((state / "service.json").read_text(encoding="utf-8"))
             if current.get("instance") == h.instance:
-                (state / "service.json").unlink()
+                lock.remove(state / "service.json")
         except (OSError, ValueError):
             pass
         sys.stderr.write(f"{answers_mod.now()} stopped\n")

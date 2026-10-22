@@ -94,7 +94,7 @@ def test_answer_tick_comment_and_approve(server, repo):
     # What the page wrote is what gate reads.
     assert run(repo, "gate", "p-4k7x2m", "s1-2") == 0
     # The item file itself was never written.
-    assert (repo / "planning" / "draft" / "a.toml").read_text() == plan_text()
+    assert (repo / "planning" / "draft" / "a.toml").read_text(encoding="utf-8") == plan_text()
 
 
 def test_lane_order_and_dependencies(server, repo):
@@ -173,15 +173,34 @@ def test_what_is_refused(server, repo):
     assert req(server, "POST", "/api/shutdown", {})[0] == 403
     assert req(server, "DELETE", "/api/repos/demo")[0] == 403, "an existing repository needs the token"
     # Out of the planning folder, by path or by symlink.
-    (repo / "secret.txt").write_text("x")
-    (repo / "planning" / "link").symlink_to(repo / "secret.txt")
-    assert req(server, "GET", "/r/demo/f/link")[0] == 404
+    (repo / "secret.txt").write_text("x", encoding="utf-8")
+    try:
+        (repo / "planning" / "link").symlink_to(repo / "secret.txt")
+    except OSError:                     # Windows, without the privilege to make one
+        pass
+    else:
+        assert req(server, "GET", "/r/demo/f/link")[0] == 404
     url = urllib.request.Request(f"http://127.0.0.1:{server}/r/demo/f/%2e%2e/secret.txt")
     with pytest.raises(urllib.error.HTTPError):
         urllib.request.urlopen(url, timeout=5)
     # A file under planning/ is served, sandboxed.
     status, _, headers = req(server, "GET", "/r/demo/f/draft/a.toml")
     assert status == 200 and headers["Content-Security-Policy"] == "sandbox"
+
+
+def test_a_refused_write_reads_its_body_first(server):
+    # A socket closed with unread data in it is reset: on Windows the client
+    # got ConnectionAbortedError instead of the 403 (2026-10-20, in the VM).
+    body = {"state": "done", "pad": "x" * 256_000}
+    for _ in range(20):
+        assert req(server, "PUT", "/api/r/demo/step/p-4k7x2m/s1-3", body, headers={})[0] == 403
+
+
+def test_what_is_refused_where_symlinks_cannot_be_made(server, repo, monkeypatch):
+    def refuse(self, target, target_is_directory=False):
+        raise OSError(1314, "A required privilege is not held by the client")   # Windows' WinError
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+    test_what_is_refused(server, repo)
 
 
 def test_registering_twice_keeps_one_entry_and_worktrees_get_their_own_slug(server, repo, tmp_path):
@@ -207,7 +226,7 @@ def detached(state):
     if info:
         try:
             os.kill(info["pid"], signal.SIGTERM)
-        except ProcessLookupError:
+        except OSError:                 # gone already (on Windows WinError 87, not ProcessLookupError)
             pass
 
 
@@ -233,7 +252,7 @@ def test_serve_registers_and_a_killed_service_comes_back(detached, repo, monkeyp
     assert run(repo, "serve") == 0
     assert "/r/demo/" in capsys.readouterr().out
     first = client.service_info()
-    os.kill(first["pid"], signal.SIGKILL)
+    os.kill(first["pid"], getattr(signal, "SIGKILL", signal.SIGTERM))   # Windows: TerminateProcess
     time.sleep(0.2)
     assert run(repo, "serve") == 0
     second = client.service_info()

@@ -1,6 +1,7 @@
 """Find, start, register with, and stop the one planning service per user.
 
-The service's state lives in `$XDG_STATE_HOME/waterrise/`:
+The service's state lives in the state directory (dirs.py:
+`$XDG_STATE_HOME/waterrise/`, `%LOCALAPPDATA%\\waterrise\\state` on Windows):
 
     service.json   pid, port, api level, version, start time, instance id
     registry.json  the projects (written by the service only); its first
@@ -26,6 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import dirs, lock
 from .errors import WaterriseError
 
 API = 1
@@ -40,11 +42,11 @@ REGISTRY = "registry.json"
 
 
 def _state_home() -> Path:
-    return Path(os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state"))
+    return dirs.state_home()
 
 
 def state_dir() -> Path:
-    return _state_home() / "waterrise"
+    return dirs.state()
 
 
 def legacy_registry() -> Path:
@@ -55,7 +57,7 @@ def legacy_registry() -> Path:
 def token(create: bool = True) -> str | None:
     path = state_dir() / "token"
     try:
-        value = path.read_text().strip()
+        value = path.read_text(encoding="utf-8").strip()
         if value:
             return value
     except FileNotFoundError:
@@ -65,14 +67,14 @@ def token(create: bool = True) -> str | None:
     path.parent.mkdir(parents=True, exist_ok=True)
     value = secrets.token_urlsafe(32)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(value + "\n")
     return value
 
 
 def service_info() -> dict | None:
     try:
-        data = json.loads((state_dir() / "service.json").read_text())
+        data = json.loads((state_dir() / "service.json").read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else None
     except (OSError, ValueError):
         return None
@@ -80,7 +82,7 @@ def service_info() -> dict | None:
 
 def registry() -> list[dict]:
     try:
-        data = json.loads((state_dir() / REGISTRY).read_text())
+        data = json.loads((state_dir() / REGISTRY).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
     repos = data.get("repos") if isinstance(data, dict) else None
@@ -108,7 +110,10 @@ class Other(Exception):
 
 
 def call(port: int, method: str, path: str, body: dict | None = None, *,
-         auth: bool = False, timeout: float = 3.0) -> tuple[int, object]:
+         auth: bool = False, timeout: float = 30.0) -> tuple[int, object]:
+    # 30 s, not 3: registering a central project runs git several times in the
+    # service, and on Windows with its virus scanner that took longer (2026-10-21,
+    # in the VM). Health checks pass a short limit of their own.
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method)
     req.add_header("Host", f"127.0.0.1:{port}")
@@ -194,38 +199,59 @@ def _src() -> Path:
 def _rotate(log: Path) -> None:
     try:
         if log.stat().st_size > LOG_LIMIT:
-            os.replace(log, log.with_suffix(".log.1"))
+            lock.replace(log, log.with_suffix(".log.1"))
     except FileNotFoundError:
         pass
 
 
+# Windows' process creation flags (subprocess has them on Windows only).
+DETACHED_PROCESS, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW = 0x00000008, 0x00000200, 0x08000000
+
+
+def _interpreter() -> str:
+    """On Windows pythonw.exe, beside the running python, so no console window opens."""
+    if dirs.WINDOWS:
+        quiet = Path(sys.executable).with_name("pythonw.exe")
+        if quiet.exists():
+            return str(quiet)
+    return sys.executable
+
+
+def _detached() -> dict:
+    """Popen arguments for a process that outlives the shell that started it."""
+    if dirs.WINDOWS:
+        return {"creationflags": DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW}
+    return {"start_new_session": True}
+
+
 def _spawn(port: int) -> int:
     """Start the service detached and return its real port."""
-    if os.name == "nt":
-        raise WaterriseError("the planning service runs on Linux and macOS only")
     sdir = state_dir()
     sdir.mkdir(parents=True, exist_ok=True)
     token()
     info = sdir / "service.json"
-    info.unlink(missing_ok=True)
+    lock.remove(info)
     log = sdir / "service.log"
     _rotate(log)
-    with open(log, "a") as out, open(os.devnull) as devnull:
+    with open(log, "a", encoding="utf-8") as out, open(os.devnull, encoding="utf-8") as devnull:
         # -P and the state directory as cwd: started from a project root,
         # `import waterrise` could find a checkout's files instead of this
         # package.
         proc = subprocess.Popen(
-            [sys.executable, "-P", "-c", _BOOT, str(_src()), str(port), str(sdir)],
-            cwd=sdir, stdin=devnull, stdout=out, stderr=out, start_new_session=True,
-            close_fds=True)
+            [_interpreter(), "-P", "-c", _BOOT, str(_src()), str(port), str(sdir)],
+            cwd=sdir, stdin=devnull, stdout=out, stderr=out, close_fds=True, **_detached())
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            tail = log.read_text(errors="replace").splitlines()[-5:]
+            tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
             raise WaterriseError("the planning service exited as it started",
                               hint="\n".join(tail) or f"see {log}")
+        # Not the pid: on Windows a venv's pythonw.exe is a launcher that runs
+        # the real interpreter as its child, so proc.pid is the launcher's.
+        # service.json was removed above and the start lock is held, so a new
+        # one is this service's.
         data = service_info()
-        if data and data.get("pid") == proc.pid and data.get("port"):
+        if data and data.get("port"):
             try:
                 if health(int(data["port"])):
                     return int(data["port"])
@@ -236,16 +262,12 @@ def _spawn(port: int) -> int:
 
 
 def _lock():
-    import fcntl
-
-    sdir = state_dir()
-    sdir.mkdir(parents=True, exist_ok=True)
-    fh = open(sdir / "start.lock", "a")
-    fcntl.flock(fh, fcntl.LOCK_EX)
-    return fh
+    return lock.acquire(state_dir() / "start.lock")
 
 
-def stop(running: Running, wait: float = 5.0) -> None:
+# Generous: it returns as soon as the service is gone, and on a loaded Windows
+# machine its way out took longer than 5 s (2026-10-20, in the VM).
+def stop(running: Running, wait: float = 15.0) -> None:
     call(running.port, "POST", "/api/shutdown", {}, auth=True)
     instance = running.health.get("instance")
     deadline = time.monotonic() + wait
@@ -290,7 +312,7 @@ def ensure(port: int | None = None) -> tuple[Running, str]:
         h = health(real)
         return Running(real, h or {}), what
     finally:
-        fh.close()
+        lock.release(fh)
 
 
 def register(running: Running, repo: Path, planning: Path, name: str, home: str | None = None) -> dict:

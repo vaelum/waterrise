@@ -81,7 +81,7 @@ class Project:
 def _git_toplevel(cwd: Path) -> Path | None:
     try:
         out = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True, timeout=5)
+                             capture_output=True, text=True, timeout=5, encoding="utf-8", stdin=subprocess.DEVNULL)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return Path(out.stdout.strip()) if out.returncode == 0 and out.stdout.strip() else None
@@ -102,7 +102,7 @@ def _registered(cwd: Path, entries: list[dict]) -> dict | None:
 def _butler_name(root: Path) -> str | None:
     for path in (root / "butler" / "butler.toml", root / "butler.toml"):
         try:
-            data = tomllib.loads(path.read_text())
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
             continue
         name = (data.get("project") or {}).get("name")

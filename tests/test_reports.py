@@ -24,7 +24,7 @@ def new_report(root: Path, name: str = "nas-throughput") -> tuple[Path, Path, st
     assert run(root, "new", "report", name) == 0
     toml = root / "planning" / "reports" / f"{name}.toml"
     doc = toml.with_suffix(".html")
-    return toml, doc, tomllib.loads(toml.read_text())["id"]
+    return toml, doc, tomllib.loads(toml.read_text(encoding="utf-8"))["id"]
 
 
 def findings(root: Path) -> list[tuple[str, str, str]]:
@@ -35,24 +35,24 @@ def findings(root: Path) -> list[tuple[str, str, str]]:
 def test_new_report_makes_the_pair_and_the_template_passes(proj):
     toml, doc, rid = new_report(proj)
     assert rid.startswith("h-") and len(rid) == 8
-    assert doc.read_text().lstrip().lower().startswith("<!doctype html")
-    assert "<title>Nas throughput</title>" in doc.read_text()
+    assert doc.read_text(encoding="utf-8").lstrip().lower().startswith("<!doctype html")
+    assert "<title>Nas throughput</title>" in doc.read_text(encoding="utf-8")
     assert findings(proj) == []
 
 
 def test_a_report_about_a_plan(proj):
     toml, doc, rid = new_report(proj)
-    toml.write_text(toml.read_text().replace('# about = "p-xxxxxx"', 'about = "p-4k7x2m"'))
+    toml.write_text(toml.read_text(encoding="utf-8").replace('# about = "p-xxxxxx"', 'about = "p-4k7x2m"'), encoding="utf-8")
     assert findings(proj) == []
-    toml.write_text(toml.read_text().replace('about = "p-4k7x2m"', 'about = "p-zzzzzz"'))
+    toml.write_text(toml.read_text(encoding="utf-8").replace('about = "p-4k7x2m"', 'about = "p-zzzzzz"'), encoding="utf-8")
     assert any("no item has that id" in m for _, _, m in findings(proj))
 
 
 def test_a_report_is_not_about_a_note(proj):
     assert run(proj, "new", "note", "n") == 0
-    nid = tomllib.loads((proj / "planning" / "notes" / "n.toml").read_text())["id"]
+    nid = tomllib.loads((proj / "planning" / "notes" / "n.toml").read_text(encoding="utf-8"))["id"]
     toml, doc, rid = new_report(proj)
-    toml.write_text(toml.read_text().replace('# about = "p-xxxxxx"', f'about = "{nid}"'))
+    toml.write_text(toml.read_text(encoding="utf-8").replace('# about = "p-xxxxxx"', f'about = "{nid}"'), encoding="utf-8")
     assert any("is a note" in m for _, _, m in findings(proj))
 
 
@@ -73,16 +73,16 @@ def test_a_missing_document_is_an_error(proj):
 ])
 def test_a_remote_resource_is_an_error(proj, snippet):
     toml, doc, rid = new_report(proj)
-    doc.write_text(doc.read_text().replace("</main>", snippet + "\n</main>"))
+    doc.write_text(doc.read_text(encoding="utf-8").replace("</main>", snippet + "\n</main>"), encoding="utf-8")
     errs = [m for f, lvl, m in findings(proj) if lvl == "error"]
     assert any("loads something from another origin" in m for m in errs), errs
 
 
 def test_a_link_and_inline_script_are_fine(proj):
     toml, doc, rid = new_report(proj)
-    doc.write_text(doc.read_text().replace(
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
         "</main>", '<a href="https://example.org/source">the source</a>\n'
-                   '<script>document.title += " ✓";</script>\n<img src="data:image/png;base64,AAAA">\n</main>'))
+                   '<script>document.title += " ✓";</script>\n<img src="data:image/png;base64,AAAA">\n</main>'), encoding="utf-8")
     assert findings(proj) == []
 
 
@@ -92,26 +92,26 @@ def test_a_link_and_inline_script_are_fine(proj):
 ])
 def test_a_credential_looking_string_is_an_error(proj, secret):
     toml, doc, rid = new_report(proj)
-    doc.write_text(doc.read_text().replace("</main>", f"<p>{secret}</p>\n</main>"))
+    doc.write_text(doc.read_text(encoding="utf-8").replace("</main>", f"<p>{secret}</p>\n</main>"), encoding="utf-8")
     assert any("looks like a credential" in m for _, _, m in findings(proj))
 
 
 def test_not_html_is_an_error(proj):
     toml, doc, rid = new_report(proj)
-    doc.write_text("just text\n")
+    doc.write_text("just text\n", encoding="utf-8")
     assert any("is not an HTML document" in m for _, _, m in findings(proj))
 
 
 def test_a_document_without_a_sidecar_is_a_warning(proj):
     (proj / "planning" / "reports").mkdir()
-    (proj / "planning" / "reports" / "loose.html").write_text("<!doctype html><title>x</title>")
+    (proj / "planning" / "reports" / "loose.html").write_text("<!doctype html><title>x</title>", encoding="utf-8")
     assert ("reports/loose.html", "warn",
             "a report's document with no sidecar (`waterrise new report` makes the pair)") in findings(proj)
 
 
 def test_a_report_lives_in_reports(proj):
     toml, doc, rid = new_report(proj)
-    put(proj, "draft/r.toml", toml.read_text().replace(rid, "h-aaaaaa"))
+    put(proj, "draft/r.toml", toml.read_text(encoding="utf-8").replace(rid, "h-aaaaaa"))
     assert any("a report belongs in reports" in m for _, _, m in findings(proj))
 
 
@@ -170,7 +170,7 @@ def test_a_plan_lists_its_reports_and_a_report_names_its_plan(proj, served):
     from tests.test_planning_service import req
 
     toml, doc, rid = new_report(proj)
-    toml.write_text(toml.read_text().replace('# about = "p-xxxxxx"', 'about = "p-4k7x2m"'))
+    toml.write_text(toml.read_text(encoding="utf-8").replace('# about = "p-xxxxxx"', 'about = "p-4k7x2m"'), encoding="utf-8")
     status, plan, _ = req(served, "GET", "/api/r/demo/item/p-4k7x2m")
     assert [r["id"] for r in plan["reports"]] == [rid]
     status, rep, _ = req(served, "GET", f"/api/r/demo/item/{rid}")

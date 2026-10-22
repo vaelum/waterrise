@@ -11,6 +11,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 from . import ui
@@ -79,7 +80,9 @@ def _html(text: str) -> str:
 
 
 def _schema_ref(item_path: Path, root: Path) -> str:
-    return os.path.relpath(root / SCHEMA_FOLDER / f"v{FORMAT}.json", item_path.parent)
+    # Forward slashes on every platform: the line is committed, and editors
+    # on Windows read them too.
+    return os.path.relpath(root / SCHEMA_FOLDER / f"v{FORMAT}.json", item_path.parent).replace("\\", "/")
 
 
 def _print_json(obj) -> None:
@@ -89,7 +92,7 @@ def _print_json(obj) -> None:
 def _git_user(root: Path) -> str:
     try:
         out = subprocess.run(["git", "-C", str(root), "config", "user.name"], capture_output=True,
-                             text=True, timeout=5)
+                             text=True, timeout=5, encoding="utf-8", stdin=subprocess.DEVNULL)
         return out.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -122,7 +125,7 @@ def cmd_init(ctx: Ctx, args) -> int:
         if user:
             lines.append(f"user = {json.dumps(user)}")
         lines.append("plan_approval = true")
-        (root / CONFIG_FILE).write_text("\n".join(lines) + "\n")
+        (root / CONFIG_FILE).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     for d in (*STATE_FOLDERS, NOTES_FOLDER):
         (root / d).mkdir(exist_ok=True)
         if not any((root / d).iterdir()):
@@ -130,7 +133,7 @@ def cmd_init(ctx: Ctx, args) -> int:
     ignore = root / ".gitignore"
     if not ignore.exists():
         # The answers files are committed; the locks beside them are not.
-        ignore.write_text("answers/.*.lock\n")
+        ignore.write_text("answers/.*.lock\n", encoding="utf-8", newline="\n")
     _write_schema(root)
     ui.ok("typed planning folder", f"{ctx.disp(root)}: {', '.join(todo)}")
     ui.note(f"next: {prog()} new plan <name>")
@@ -140,7 +143,7 @@ def cmd_init(ctx: Ctx, args) -> int:
 def _write_schema(root: Path) -> Path:
     path = root / SCHEMA_FOLDER / f"v{FORMAT}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(json_schema(), indent=2) + "\n")
+    path.write_text(json.dumps(json_schema(), indent=2) + "\n", encoding="utf-8", newline="\n")
     return path
 
 
@@ -153,7 +156,7 @@ def cmd_schema(ctx: Ctx, args) -> int:
 
 
 def cmd_guide(ctx: Ctx, args) -> int:
-    ui.plain((HERE / "GUIDE.md").read_text().rstrip())
+    ui.plain((HERE / "GUIDE.md").read_text(encoding="utf-8").rstrip())
     return 0
 
 
@@ -175,7 +178,7 @@ def cmd_new(ctx: Ctx, args) -> int:
     taken = {i.id for i in f.items} | set(f.answer_files)
     item_id = new_id(args.kind, taken)
     title = args.title or args.name.replace("-", " ").capitalize()
-    text = (HERE / "templates" / f"{args.kind}.toml").read_text()
+    text = (HERE / "templates" / f"{args.kind}.toml").read_text(encoding="utf-8")
     text = (text.replace("{id}", item_id).replace("{title}", title.replace('"', '\\"'))
             .replace("{today}", _dt.date.today().isoformat())
             .replace("{schema}", _schema_ref(path, f.root)))
@@ -185,11 +188,12 @@ def cmd_new(ctx: Ctx, args) -> int:
     if ctx.would(f"write {ctx.disp(path)} ({item_id})"):
         return 0
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8", newline="\n")
     ui.ok(item_id, ctx.disp(path))
     if args.kind == "report":
         # The document beside the sidecar: a starting point that passes check.
-        doc.write_text((HERE / "templates" / "report.html").read_text().replace("{title}", _html(title)))
+        starter = (HERE / "templates" / "report.html").read_text(encoding="utf-8")
+        doc.write_text(starter.replace("{title}", _html(title)), encoding="utf-8", newline="\n")
         ui.ok("and", ctx.disp(doc))
     ui.note(f"fill it in, then: {prog()} check")
     return 0
@@ -553,7 +557,7 @@ def cmd_convert(ctx: Ctx, args) -> int:
         raw = None
         if answers_file.is_file():
             try:
-                raw = json.loads(answers_file.read_text())
+                raw = json.loads(answers_file.read_text(encoding="utf-8"))
             except ValueError:
                 ui.warn("ignored", f"{ctx.disp(answers_file)} is not JSON")
         draft = convert_mod.from_form(src.read_text(encoding="utf-8"), name,
@@ -571,7 +575,7 @@ def cmd_convert(ctx: Ctx, args) -> int:
     if ctx.would(f"write {ctx.disp(target)}" + (f" and answers/{item_id}.json" if draft.answers else "")):
         return 0
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text)
+    target.write_text(text, encoding="utf-8", newline="\n")
     if draft.answers:
         def change(d: dict) -> None:
             d.setdefault("decisions", {}).update(draft.answers)
@@ -629,14 +633,21 @@ def cmd_service(ctx: Ctx, args) -> int:
             ui.plain(f"  {r.get('slug'):28} {r['path']}{gone}")
         return 0
     if action == "run":
-        # In the foreground, for the systemd unit: the same service `serve`
-        # starts detached, with its log on stderr.
+        # In the foreground, for the systemd unit and Windows' Run value: the
+        # same service `serve` starts detached, with its log on stderr.
         if running:
             raise WaterriseError(f"the planning service already runs on port {running.port}",
                                  hint=f"{prog()} service stop, first")
         from . import service as service_mod
 
         client.token()
+        if sys.stderr is None:
+            # pythonw.exe, as the Run value starts it at logon, has no stdout
+            # or stderr: the log goes where `serve`'s goes, or the service's
+            # first line would end it (2026-10-21, in the Windows VM).
+            log = client.state_dir() / "service.log"
+            client._rotate(log)
+            sys.stdout = sys.stderr = open(log, "a", encoding="utf-8", buffering=1)
         service_mod.main([str(client.wanted_port(args.port)), str(client.state_dir())])
         return 0
     if action == "logs":
@@ -644,7 +655,7 @@ def cmd_service(ctx: Ctx, args) -> int:
         if not log.exists():
             ui.note("no log yet")
             return 0
-        ui.plain("\n".join(log.read_text(errors="replace").splitlines()[-args.lines:]))
+        ui.plain("\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-args.lines:]))
         return 0
     if action == "stop":
         if not running:
@@ -843,7 +854,9 @@ def nodes() -> list[Node]:
                    arg("--uninstall", action="store_true",
                        help="remove the unit, the launcher and the venv; the registry and the plans stay"),
                    arg("--boot", action="store_true",
-                       help="also a systemd user unit that starts the service at login"),
-                   arg("--no-boot", action="store_true", help="only remove that unit")],
+                       help="also start the service at login: a systemd user unit, or on Windows a Run value"),
+                   arg("--no-boot", action="store_true", help="only remove that"),
+                   arg("--no-path", action="store_true",
+                       help="Windows: write the launcher, but leave the user's PATH alone")],
              func=install_mod.cmd_install),
     ]

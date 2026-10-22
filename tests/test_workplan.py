@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -204,12 +205,12 @@ def test_wait_stops_when_cancelled(fake):
 def repo(tmp_path, monkeypatch):
     r = tmp_path / "proj"
     (r / "planning" / "draft").mkdir(parents=True)
-    (r / "planning" / "draft" / "a.toml").write_text('kind = "plan"\nid = "p-abc123"\ntitle = "A"\n')
+    (r / "planning" / "draft" / "a.toml").write_text('kind = "plan"\nid = "p-abc123"\ntitle = "A"\n', encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(r)], check=True)
     state = tmp_path / "state"
     (state / "waterrise").mkdir(parents=True)
     (state / "waterrise" / "registry.json").write_text(
-        json.dumps({"repos": [{"name": "proj", "path": str(r)}]}))
+        json.dumps({"repos": [{"name": "proj", "path": str(r)}]}), encoding="utf-8")
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     return r
 
@@ -231,10 +232,10 @@ def test_a_deploy_clone_of_the_same_repository_is_not_an_ambiguity(repo, tmp_pat
     clone = tmp_path / "deploy"
     subprocess.run(["git", "clone", "-q", str(repo), str(clone)], check=True, capture_output=True)
     (clone / "planning" / "draft").mkdir(parents=True, exist_ok=True)
-    (clone / "planning" / "draft" / "a.toml").write_text('kind = "plan"\nid = "p-abc123"\n')
+    (clone / "planning" / "draft" / "a.toml").write_text('kind = "plan"\nid = "p-abc123"\n', encoding="utf-8")
     reg = tmp_path / "state" / "waterrise" / "registry.json"
     reg.write_text(json.dumps({"repos": [{"name": "proj", "path": str(repo)},
-                                         {"name": "proj", "path": str(clone)}]}))
+                                         {"name": "proj", "path": str(clone)}]}), encoding="utf-8")
     assert workplan.resolve("p-abc123").repo == repo
     assert workplan.resolve("p-abc123", clone).repo == clone
     assert workplan.resolve(f"{clone}:p-abc123").repo == clone
@@ -307,11 +308,16 @@ def test_a_tool_error_is_returned_to_the_agent(monkeypatch):
 # --- running it ------------------------------------------------------------ #
 
 
+# The interpreter outside any venv. On Windows not `python3`: that name is the
+# Microsoft Store's stub there, which prints nothing and exits 9009.
+BARE = "python3" if os.name != "nt" else getattr(sys, "_base_executable", sys.executable)
+
+
 def test_the_server_starts_on_a_bare_interpreter():
     path = REPO / "waterrise" / "mcp" / "server.py"
     msg = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n"
-    out = subprocess.run(["python3", "-I", str(path)], input=msg, capture_output=True,
-                         text=True, timeout=30)
+    out = subprocess.run([BARE, "-I", str(path)], input=msg, capture_output=True,
+                         text=True, timeout=30, encoding="utf-8")
     assert json.loads(out.stdout) == {"jsonrpc": "2.0", "id": 1, "result": {}}
 
 
@@ -319,11 +325,11 @@ def test_the_work_plan_skill_inlines_the_servers_prompt():
     # skills/work-plan is `/work-plan <plan>`; it must print the prompt's text,
     # reaching the server from the skill's directory, not keep a copy of it.
     root = REPO
-    skill = (root / "skills" / "work-plan" / "SKILL.md").read_text()
+    skill = (root / "skills" / "work-plan" / "SKILL.md").read_text(encoding="utf-8")
     assert '"${CLAUDE_SKILL_DIR}/../../waterrise/mcp/server.py" --prompt "$ARGUMENTS"' in skill
-    out = subprocess.run(["python3", "-I", str(root / "skills" / "work-plan" / ".." / ".."
+    out = subprocess.run([BARE, "-I", str(root / "skills" / "work-plan" / ".." / ".."
                                               / "waterrise" / "mcp" / "server.py"), "--prompt", "cac:p-zha4jf"],
-                         capture_output=True, text=True, timeout=30, check=True)
+                         capture_output=True, text=True, timeout=30, check=True, encoding="utf-8")
     assert out.stdout == server.prompt_text("cac:p-zha4jf")
 
 
@@ -332,15 +338,15 @@ def test_plan_status_runs_waterrise_for_a_project_with_no_butler(tmp_path, monke
     project that has no butler.py, and reads a plan its registry points at."""
     proj = tmp_path / "proj"
     (proj / "plans" / "draft").mkdir(parents=True)
-    (proj / "plans" / "planning.toml").write_text("format = 1\nplan_approval = true\n")
+    (proj / "plans" / "planning.toml").write_text("format = 1\nplan_approval = true\n", encoding="utf-8")
     (proj / "plans" / "draft" / "a.toml").write_text(
         'kind = "plan"\nid = "p-abc123"\ntitle = "A"\nsummary = "s"\n'
-        'created = 2026-10-18\nupdated = 2026-10-18\nwhy = "w"\n')
+        'created = 2026-10-18\nupdated = 2026-10-18\nwhy = "w"\n', encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(proj)], check=True)
     state = tmp_path / "state"
     (state / "waterrise").mkdir(parents=True)
     (state / "waterrise" / "registry.json").write_text(json.dumps(
-        {"repos": [{"name": "proj", "path": str(proj), "planning": str(proj / "plans"), "slug": "proj"}]}))
+        {"repos": [{"name": "proj", "path": str(proj), "planning": str(proj / "plans"), "slug": "proj"}]}), encoding="utf-8")
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("WATERRISE", str(REPO))
     plan = workplan.resolve("proj:p-abc123")
@@ -351,10 +357,10 @@ def test_plan_status_runs_waterrise_for_a_project_with_no_butler(tmp_path, monke
 def test_the_server_answers_plan_status_with_no_butler_on_the_path(tmp_path):
     proj = tmp_path / "proj"
     (proj / "planning" / "draft").mkdir(parents=True)
-    (proj / "planning" / "planning.toml").write_text("format = 1\n")
+    (proj / "planning" / "planning.toml").write_text("format = 1\n", encoding="utf-8")
     (proj / "planning" / "draft" / "a.toml").write_text(
         'kind = "plan"\nid = "p-abc123"\ntitle = "A plan"\nsummary = "s"\n'
-        'created = 2026-10-18\nupdated = 2026-10-18\nwhy = "w"\n')
+        'created = 2026-10-18\nupdated = 2026-10-18\nwhy = "w"\n', encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(proj)], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith(("WATERRISE", "PYTHON"))}
     # No service to start: `serve` fails, and the reply carries no page.
@@ -365,19 +371,32 @@ def test_the_server_answers_plan_status_with_no_butler_on_the_path(tmp_path):
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
              "params": {"name": "plan_status", "arguments": {"plan": str(proj / "planning" / "draft" / "a.toml")}}}]
     proc = subprocess.Popen([sys.executable, "-I", str(REPO / "waterrise" / "mcp" / "server.py")],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env, cwd=proj)
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env, cwd=proj, encoding="utf-8")
     for m in msgs:
         proc.stdin.write(json.dumps(m) + "\n")
     proc.stdin.flush()
-    replies = {}
-    while len(replies) < 3:
-        line = proc.stdout.readline()
-        if not line:
-            break
-        msg = json.loads(line)
-        replies[msg.get("id")] = msg
+    replies, lines = {}, []
+
+    def read():
+        for line in proc.stdout:
+            lines.append(line)
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue                # reported below, if a reply is missing
+            replies[msg.get("id")] = msg
+            if len(replies) == 3:
+                return
+    # In a thread: a server that hangs fails the test instead of hanging it.
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+    reader.join(60)
+    if reader.is_alive():
+        proc.kill()
+        pytest.fail(f"the server answered {sorted(replies)} of three requests within 60 s")
     proc.stdin.close()
     proc.wait(timeout=10)
+    assert 3 in replies, f"no answer to tools/call; the server's stdout was: {lines!r}"
     text = replies[3]["result"]["content"][0]["text"]
     assert replies[3]["result"]["isError"] is False, text
     assert "p-abc123" in text and "A plan" in text
@@ -392,14 +411,14 @@ def test_a_central_project_resolves_by_file_id_and_repo_id(tmp_path, monkeypatch
     planning = plans / "proj" / "planning"
     (planning / "draft").mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(plans)], check=True)
-    (planning / "planning.toml").write_text("format = 1\n")
+    (planning / "planning.toml").write_text("format = 1\n", encoding="utf-8")
     plan_file = planning / "draft" / "a.toml"
     plan_file.write_text('kind = "plan"\nid = "p-abc123"\ntitle = "A"\nsummary = "s"\n'
-                         'created = 2026-10-18\nupdated = 2026-10-18\nwhy = "w"\n')
+                         'created = 2026-10-18\nupdated = 2026-10-18\nwhy = "w"\n', encoding="utf-8")
     state = tmp_path / "state"
     (state / "waterrise").mkdir(parents=True)
     (state / "waterrise" / "registry.json").write_text(json.dumps({"repos": [
-        {"name": "proj", "path": str(proj), "planning": str(planning), "slug": "proj", "home": "central"}]}))
+        {"name": "proj", "path": str(proj), "planning": str(planning), "slug": "proj", "home": "central"}]}), encoding="utf-8")
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("WATERRISE", str(REPO))
@@ -408,3 +427,17 @@ def test_a_central_project_resolves_by_file_id_and_repo_id(tmp_path, monkeypatch
     assert workplan.resolve("proj:p-abc123") == want
     assert workplan.resolve("p-abc123") == want
     assert workplan.status(want)["file"] == "draft/a.toml"
+
+
+def test_the_server_speaks_utf8_whatever_the_code_page():
+    # PYTHONIOENCODING stands in for a cp1252 console: before Python 3.15 that
+    # is Windows' default, and replies with an em dash came out as cp1252.
+    path = REPO / "waterrise" / "mcp" / "server.py"
+    msg = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping", "note": "über — ✓"}, ensure_ascii=False) + "\n"
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+    out = subprocess.run([sys.executable, str(path), "--prompt", "plan — ✓"], capture_output=True,
+                         env=env, timeout=30, stdin=subprocess.DEVNULL)
+    assert "plan — ✓" in out.stdout.decode("utf-8") and b"\r\n" not in out.stdout
+    out = subprocess.run([sys.executable, str(path)], input=msg.encode("utf-8"), capture_output=True,
+                         env=env, timeout=30)
+    assert json.loads(out.stdout.decode("utf-8")) == {"jsonrpc": "2.0", "id": 1, "result": {}}

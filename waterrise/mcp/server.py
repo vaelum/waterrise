@@ -233,7 +233,18 @@ class Server:
                 self.handle(m)
 
 
+def utf8_stdio() -> None:
+    """JSON-RPC over stdio is UTF-8, whatever the console's code page: before
+    Python 3.15, Windows' stdio is cp1252 by default, and a reply with an em
+    dash reached the client as a byte it could not decode (2026-10-20, in the
+    Windows VM). Newlines stay \\n: one message per line, no CR."""
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", newline="\n" if stream is sys.stdout else None)
+
+
 if __name__ == "__main__":
+    utf8_stdio()
     # `--prompt <plan>` prints the prompt instead of serving, for the
     # `/work-plan` skill (skills/work-plan), which inlines it.
     if len(sys.argv) == 3 and sys.argv[1] == "--prompt":

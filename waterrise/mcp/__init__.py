@@ -69,6 +69,21 @@ class Plan:
         return f"{self.repo.name}:{self.id}"
 
 
+def _key(path: Path | str) -> str:
+    """A path as compared here. On Windows git prints `C:/Users/…` while
+    Python resolves to `c:\\Users\\…` or a short `RUNNER~1` name: resolved,
+    normalised and case-folded, the two are the same."""
+    try:
+        path = Path(path).resolve()
+    except OSError:
+        pass
+    return _norm(str(path))
+
+
+def _norm(path: str, flavour=os.path) -> str:
+    return flavour.normcase(flavour.normpath(path))
+
+
 def known_repos(cwd: Path | None = None) -> list[tuple[str, Path, Path]]:
     """(name, root, planning folder) of the projects to search for a bare id:
     the current one first, then every one `serve` has registered, in its order.
@@ -83,20 +98,29 @@ def known_repos(cwd: Path | None = None) -> list[tuple[str, Path, Path]]:
     if cwd is not None:
         top = _git_toplevel(cwd)
         if top is not None:
-            found.append(next((e for e in registered if e[1] == top), (top.name, top, top / "planning")))
+            found.append(next((e for e in registered if _key(e[1]) == _key(top)),
+                              (top.name, top, top / "planning")))
     for entry in registered:
-        if entry[1] not in [e[1] for e in found]:
+        if _key(entry[1]) not in [_key(e[1]) for e in found]:
             found.append(entry)
     return found
 
 
-def _git_toplevel(path: Path) -> Path | None:
+def _git_toplevel(path: Path, why: list[str] | None = None) -> Path | None:
+    """The repository `path` is in; what git said instead goes into `why`."""
     try:
         out = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
-                             capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
+                             capture_output=True, text=True, timeout=10, encoding="utf-8",
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        if why is not None:
+            why.append(f"git did not run: {e}")
         return None
-    return Path(out.stdout.strip()) if out.returncode == 0 else None
+    if out.returncode != 0:
+        if why is not None:
+            why.append((out.stderr or out.stdout).strip() or f"git exited {out.returncode}")
+        return None
+    return Path(out.stdout.strip()).resolve()
 
 
 def _item_id(path: Path) -> str | None:
@@ -131,18 +155,21 @@ def resolve(spec: str, cwd: Path | None = None) -> Plan:
         # A central project's file lives in the central repository: its
         # project is the registry entry whose folder holds it, not that
         # repository's toplevel.
-        here = as_path.resolve()
-        owner = next((e for e in known_repos(cwd) if e[2].resolve() in here.parents), None)
-        repo = owner[1] if owner else _git_toplevel(as_path.parent)
-        if not item_id or repo is None:
-            raise PlanError(f"{as_path} is not a planning item inside a git repository")
+        here = _key(as_path)
+        owner = next((e for e in known_repos(cwd) if here.startswith(_key(e[2]) + os.sep)), None)
+        why: list[str] = []
+        repo = owner[1] if owner else _git_toplevel(as_path.parent, why)
+        if not item_id:
+            raise PlanError(f"{as_path} is not a planning item: it has no id")
+        if repo is None:
+            raise PlanError(f"{as_path} is not inside a git repository ({'; '.join(why) or 'git found none'})")
         return Plan(repo=repo, id=item_id)
 
     repo_name, _, item_id = spec.rpartition(":")
     repos = known_repos(cwd)
     if repo_name and Path(repo_name).expanduser().is_dir():
         root = Path(repo_name).expanduser().resolve()
-        repos = [next((e for e in repos if e[1] == root), (root.name, root, root / "planning"))]
+        repos = [next((e for e in repos if _key(e[1]) == _key(root)), (root.name, root, root / "planning"))]
     elif repo_name:
         named = [r for r in repos if r[0] == repo_name]
         if not named:
@@ -177,7 +204,7 @@ def _waterrise(plan: Plan, *args: str, timeout: float = 60) -> subprocess.Comple
     try:
         return subprocess.run([*command(), "--no-color", *args], cwd=plan.repo, env=env,
                               capture_output=True, text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, encoding="utf-8")
     except subprocess.TimeoutExpired:
         raise PlanError(f"`waterrise {' '.join(args)}` took longer than {timeout:.0f}s") from None
     except OSError as e:

@@ -15,7 +15,7 @@ from waterrise import __main__ as cli
 
 
 def git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True).stdout
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, check=True, encoding="utf-8").stdout
 
 
 @pytest.fixture
@@ -74,7 +74,7 @@ def test_a_central_project_plans_in_the_central_repository(server, project):
 
 def test_an_edit_is_committed_by_the_next_check(server, project):
     assert in_(project, "projects", "add", str(project), "--home", "central") == 0
-    (central.planning_for("x") / "draft" / "a.toml").write_text(plan_text())
+    (central.planning_for("x") / "draft" / "a.toml").write_text(plan_text(), encoding="utf-8")
     assert in_(project, "check") == 0
     assert git(central.root(), "log", "-1", "--format=%s").strip() == "x: check"
     assert git(central.root(), "status", "--porcelain") == ""
@@ -82,7 +82,7 @@ def test_an_edit_is_committed_by_the_next_check(server, project):
 
 def test_a_page_answer_on_a_central_project_is_committed(server, project):
     assert in_(project, "projects", "add", str(project), "--home", "central") == 0
-    (central.planning_for("x") / "draft" / "a.toml").write_text(plan_text())
+    (central.planning_for("x") / "draft" / "a.toml").write_text(plan_text(), encoding="utf-8")
     central.commit("x", "x: the plan")
     status, _, _ = req(server, "PUT", "/api/r/x/decision/p-4k7x2m/alerts", {"selected": ["mail"]})
     assert status == 200
@@ -99,7 +99,7 @@ def test_a_page_answer_on_a_central_project_is_committed(server, project):
 def test_a_move_in_a_central_folder_is_a_git_mv_in_the_central_repository(server, project):
     assert in_(project, "projects", "add", str(project), "--home", "central") == 0
     planning = central.planning_for("x")
-    (planning / "draft" / "a.toml").write_text(plan_text())
+    (planning / "draft" / "a.toml").write_text(plan_text(), encoding="utf-8")
     central.commit("x", "x: the plan")
     f = folder.read(planning, central.root())
     f.move(f.get("p-4k7x2m"), "todo")
@@ -147,7 +147,7 @@ def _repo_project(env: Path) -> Path:
     git(root, "config", "user.email", "t@example.org")
     git(root, "config", "user.name", "t")
     assert run(root, "init") == 0
-    (root / "planning" / "draft" / "a.toml").write_text(plan_text())
+    (root / "planning" / "draft" / "a.toml").write_text(plan_text(), encoding="utf-8")
     git(root, "add", "-A")
     git(root, "commit", "-q", "-m", "a plan")
     return root
@@ -182,14 +182,13 @@ def test_projects_home_carries_the_folder_there_and_back(server, env):
     assert entry["home"] == "repo" and entry["planning"] == str(root / "planning")
 
 
-def test_projects_home_refuses_while_an_answers_file_is_locked(server, env, capsys):
-    import fcntl
+def test_projects_home_refuses_while_an_answers_file_is_locked(server, env, capsys, locks):
+    from waterrise import lock
 
     root = _repo_project(env)
     assert in_(root, "projects", "add", str(root)) == 0
     assert req(server, "PUT", "/api/r/r/decision/p-4k7x2m/alerts", {"selected": ["mail"]})[0] == 200
-    with open(root / "planning" / "answers" / ".p-4k7x2m.json.lock", "a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+    with lock.held(root / "planning" / "answers" / ".p-4k7x2m.json.lock"):
         assert in_(root, "projects", "home", "r", "central") == 1
     assert "is writing p-4k7x2m.json" in capsys.readouterr().err
     assert (root / "planning" / "draft" / "a.toml").exists() and not central.planning_for("r").exists()

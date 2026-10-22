@@ -35,6 +35,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
+from . import lock as lock_mod
 from .types import FORMAT
 
 _locks: dict[str, threading.Lock] = {}
@@ -76,19 +77,9 @@ def _locked(path: Path):
         lock = _locks.setdefault(key, threading.Lock())
     with lock:
         # And across processes: a `planning resolve` in a terminal while the
-        # service writes the same file. POSIX only, like the service itself.
-        path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            import fcntl
-        except ImportError:  # pragma: no cover - Windows
+        # service writes the same file.
+        with lock_mod.held(path.parent / f".{path.name}.lock"):
             yield
-            return
-        with open(path.parent / f".{path.name}.lock", "a") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def write(path: Path, data: dict) -> None:
@@ -96,11 +87,11 @@ def write(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}.", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
             f.write(text)
         # mkstemp makes the file 0600; answers are committed like any other file.
         os.chmod(tmp, 0o644)
-        os.replace(tmp, path)
+        lock_mod.replace(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

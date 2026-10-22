@@ -24,11 +24,30 @@ _color: bool | None = None
 
 
 def init(no_color: bool = False) -> None:
-    """Decide once, at startup, whether anything is coloured."""
+    """Decide once, at startup, whether anything is coloured, and make sure
+    nothing printed can fail or be misread. Into a pipe or a file, UTF-8,
+    unless PYTHONIOENCODING says otherwise: what reads `status --json` reads
+    UTF-8, and before Python 3.15 Windows would write cp1252 there. On a
+    console that isn't UTF-8, a ✓ becomes a ? instead of a UnicodeEncodeError."""
     global _color
+    for stream in (sys.stdout, sys.stderr):
+        if not hasattr(stream, "reconfigure"):
+            continue
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding == "utf8":
+            continue
+        try:
+            tty = stream.isatty()
+        except (OSError, ValueError):
+            tty = False
+        if not tty and not os.environ.get("PYTHONIOENCODING"):
+            stream.reconfigure(encoding="utf-8")
+        else:
+            stream.reconfigure(errors="replace")
     _color = not (
         no_color
         or os.environ.get("NO_COLOR") is not None
+        or sys.stdout is None             # pythonw.exe has none
         or not sys.stdout.isatty()
     )
 

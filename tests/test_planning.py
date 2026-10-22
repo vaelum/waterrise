@@ -19,7 +19,7 @@ TODAY = dt.date.today().isoformat()
 
 def make_project(tmp_path: Path) -> Path:
     (tmp_path / "butler").mkdir(parents=True)
-    (tmp_path / "butler" / "butler.toml").write_text('[project]\nname = "demo"\n')
+    (tmp_path / "butler" / "butler.toml").write_text('[project]\nname = "demo"\n', encoding="utf-8")
     return tmp_path
 
 
@@ -109,7 +109,7 @@ title = "Checks"
 def put(root: Path, rel: str, text: str) -> Path:
     p = root / "planning" / rel
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(text)
+    p.write_text(text, encoding="utf-8")
     return p
 
 
@@ -149,7 +149,7 @@ def test_step_hash_ignores_state_and_defaults():
 
 
 def test_the_guide_reference_is_generated_from_the_types():
-    assert guide.PATH.read_text() == guide.rendered(guide.PATH.read_text()), \
+    assert guide.PATH.read_text(encoding="utf-8") == guide.rendered(guide.PATH.read_text(encoding="utf-8")), \
         "GUIDE.md is out of date: python -m waterrise.guide"
 
 
@@ -174,7 +174,7 @@ def test_init_new_and_check(proj, capsys):
     assert rep.errors == 0, messages(rep)
     kinds = sorted(i.kind for i in folder.read(root).items)
     assert kinds == sorted(types.KINDS)
-    first = (root / "draft" / "a-plan.toml").read_text().splitlines()[0]
+    first = (root / "draft" / "a-plan.toml").read_text(encoding="utf-8").splitlines()[0]
     assert first == "#:schema ../.schema/v1.json"
 
 
@@ -182,6 +182,8 @@ def test_new_refuses_a_wrong_folder(proj):
     assert run(proj, "new", "note", "x", "--folder", "todo") != 0
 
 
+@pytest.mark.skipif(not (REPO / "planning" / "planning.toml").is_file(),
+                    reason="a clone of the GitHub mirror, which leaves planning/ out (butler/butler.toml)")
 def test_this_repositorys_plan_checks_clean(tmp_path):
     # As committed, answers included: a gated step that is active needs the
     # approval in answers/, and the committed plan must pass its own check.
@@ -283,7 +285,7 @@ def test_a_done_step_needs_what_it_needs_done(proj):
 def test_markdown_plans_and_stray_files_are_warnings(proj):
     put(proj, "done/old.md", "# Old\n- [x] thing\n")
     put(proj, "draft/form.html", "<html></html>")
-    (proj / "planning" / "junk.txt").write_text("x")
+    (proj / "planning" / "junk.txt").write_text("x", encoding="utf-8")
     rep = report(proj)
     warns = " ".join(messages(rep, "warn"))
     assert "Markdown plan" in warns and "forms prototype" in warns and "does not belong" in warns
@@ -356,20 +358,27 @@ def test_a_disapproved_step_must_be_dropped_or_rewritten(proj):
     assert not any("was disapproved" in m for m in messages(report(proj)))
 
 
-def test_answers_merge_one_entry_at_a_time(tmp_path):
+def test_answers_merge_one_entry_at_a_time(tmp_path, locks):
     path = tmp_path / "answers" / "p-4k7x2m.json"
 
+    failed = []
+
     def worker(i):
-        answers.update(path, "p-4k7x2m", lambda d: d["decisions"].__setitem__(f"q{i}", {"selected": ["a"]}))
+        try:
+            answers.update(path, "p-4k7x2m", lambda d: d["decisions"].__setitem__(f"q{i}", {"selected": ["a"]}))
+        except Exception as e:      # a thread's exception would otherwise pass unseen
+            failed.append(e)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(20)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    assert not failed
     assert len(answers.read(path)["decisions"]) == 20
     # Committed like any other file, not left owner-only by mkstemp.
-    assert path.stat().st_mode & 0o777 == 0o644
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o644
 
 
 def test_status_list_and_resolve(proj, capsys):
@@ -421,7 +430,7 @@ def test_an_approved_plan_moves_to_todo_with_its_decisions_open(proj):
 
 def test_without_plan_approval_open_decisions_keep_a_plan_out_of_todo(proj):
     cfg = proj / "planning" / "planning.toml"
-    cfg.write_text(cfg.read_text().replace("plan_approval = true", "plan_approval = false"))
+    cfg.write_text(cfg.read_text(encoding="utf-8").replace("plan_approval = true", "plan_approval = false"), encoding="utf-8")
     put(proj, "todo/a.toml", plan_text())
     errs = " ".join(messages(report(proj)))
     assert "has open decisions: alerts" in errs and "has not been approved" not in errs
@@ -472,7 +481,7 @@ def test_convert_a_markdown_plan(proj):
     src = put(proj, "done/22-tailnet.md", MD_PLAN)
     assert run(proj, "convert", str(src)) == 0
     target = proj / "planning" / "done" / "22-tailnet.toml"
-    data = tomllib.loads(target.read_text())
+    data = tomllib.loads(target.read_text(encoding="utf-8"))
     steps = data["phase"][0]["step"]
     assert [s["state"] if "state" in s else "open" for s in steps] == ["done", "open", "dropped"]
     assert steps[1]["by"] == "user" and "Three of them" in steps[1]["details"]
@@ -529,7 +538,7 @@ The order matters.
 def test_convert_reads_subsections_as_phases_and_plain_bullets_as_titles(proj):
     src = put(proj, "in-progress/node-setup.md", MD_NESTED)
     assert run(proj, "convert", str(src)) == 0
-    data = tomllib.loads((proj / "planning" / "in-progress" / "node-setup.toml").read_text())
+    data = tomllib.loads((proj / "planning" / "in-progress" / "node-setup.toml").read_text(encoding="utf-8"))
     assert [p["title"] for p in data["phase"]] == ["N0 — one data root", "N1 — ship the topology"]
     first = data["phase"][0]["step"][0]
     assert first["title"] == "Pin the UID and GID: `useradd --system`" and first["state"] == "done"
@@ -574,7 +583,7 @@ No updater.
 def test_convert_keeps_the_prose_around_checkboxes_and_the_shape_of_a_step(proj):
     src = put(proj, "done/linux.md", MD_PROSE)
     assert run(proj, "convert", str(src)) == 0
-    data = tomllib.loads((proj / "planning" / "done" / "linux.toml").read_text())
+    data = tomllib.loads((proj / "planning" / "done" / "linux.toml").read_text(encoding="utf-8"))
     titles = [x["title"] for x in data["section"]]
     assert titles == ["Part I — the client", "Part I — the client: Phases", "Part I — the client: Updates"]
     assert data["section"][0]["body"].strip() == "What this part covers."

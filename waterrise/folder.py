@@ -176,7 +176,7 @@ class Folder:
         target.parent.mkdir(parents=True, exist_ok=True)
         if _tracked(self.repo, it.path):
             subprocess.run(["git", "-C", str(self.repo), "mv", str(it.path), str(target)],
-                           check=True, capture_output=True, timeout=30)
+                           check=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
         else:
             it.path.rename(target)
         return target
@@ -185,7 +185,7 @@ class Folder:
 def _tracked(repo: Path, path: Path) -> bool:
     try:
         return subprocess.run(["git", "-C", str(repo), "ls-files", "--error-unmatch", str(path)],
-                              capture_output=True, timeout=5).returncode == 0
+                              capture_output=True, timeout=5, stdin=subprocess.DEVNULL).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
