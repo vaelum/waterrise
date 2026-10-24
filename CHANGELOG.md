@@ -7,6 +7,19 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.10.6]
+
+Only the documentation changes in this release; nothing to update but the
+version.
+
+### Added
+
+- **User documentation in `docs/`.** Installing waterrise, the planning
+  folder, the pages, working with an agent (including the skills and the
+  work-plan MCP server, set up by hand), and the commands, each on a page of
+  its own. The guide stays where `waterrise guide` reads it, in the package,
+  and the docs point at it.
+
 ## [2026.10.5]
 
 ### Added
