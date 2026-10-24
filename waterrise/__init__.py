@@ -1,7 +1,7 @@
 """waterrise: typed plans, `waterrise check`, and the local service. See GUIDE.md."""
 
 # <year>.<month>.<n>: n counts the month's releases from 1; no zero padding.
-__version__ = "2026.10.4"
+__version__ = "2026.10.5"
 
 # The oldest pin this waterrise still serves. A release that breaks what
 # butler or description call (the command line, `status --json`) raises it to

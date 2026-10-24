@@ -659,6 +659,9 @@
       const out = [back(`/r/${slug}/`)];
       out.push(h('h1', {}, d.title));
       if (d.summary) out.push(h('p', { class: 'lede' }, mdi(d.summary)));
+      // The plan's reports, first after the summary (where, amos 2026-10-24):
+      // every one of its own, broken and missing ones as such, never left out.
+      if (v.kind === 'plan' && (v.reports || []).length) out.push(reportsBlock(v.reports));
 
       const probs = (v.problems || []);
       if (probs.length) {
@@ -706,12 +709,6 @@
             h('summary', {}, s.title), md(s.body), s.id ? comments(s.id) : null);
           out.push(det);
         });
-      }
-      if ((v.reports || []).length) {
-        out.push(h('h2', { class: 'reading' }, `Reports (${v.reports.length})`));
-        out.push(h('ul', { class: 'reading reports' }, v.reports.map(r => h('li', {},
-          h('a', { href: `/r/${slug}/i/${r.id}` }, r.title), r.updated ? h('span', { class: 'muted small' }, ' · ' + r.updated) : null,
-          r.summary ? h('div', { class: 'muted small' }, r.summary) : null))));
       }
 
       const decisions = v.kind === 'decision' ? [Object.assign({}, d, { id: v.id })] : (d.decision || []);
@@ -898,6 +895,59 @@
       document.body.classList.toggle('focus', on);
     }
 
+    function reportsBlock(reports) {
+      const how = { about: 'about this plan', step: 'about a step', named: 'named by this plan' };
+      const rows = reports.map(r => {
+        if (r.missing) {
+          return h('li', { class: 'report-row missing' }, h('code', {}, r.id),
+            badge('missing', 'warn'), h('div', { class: 'muted small' }, `${r.named_in} names it, but there is no such report`));
+        }
+        const title = r.broken ? h('span', {}, r.title || r.file) : h('a', { href: `/r/${slug}/i/${r.id}` }, mdi(r.title));
+        const meta = [r.links.map(l => l === 'step' ? `about ${r.step}` : how[l]).join(', ')];
+        if (r.updated) meta.push(String(r.updated));
+        return h('li', { class: 'report-row' + (r.broken ? ' broken' : '') }, title, ' ',
+          r.broken ? badge('cannot be read', 'warn') : r.state === 'draft' ? badge('draft', 'muted') : null,
+          r.step ? h('a', { class: 'small', href: '#' + r.step }, ' ', r.step) : null,
+          h('div', { class: 'muted small' }, meta.join(' · ')),
+          r.broken ? h('div', { class: 'small' }, `${r.file}: ${r.problem}`) : r.summary ? h('div', { class: 'muted small' }, mdi(r.summary)) : null);
+      });
+      return h('section', { class: 'reports-block card', id: 'reports' },
+        h('h2', {}, 'Reports ', h('span', { class: 'h-meta' }, String(reports.length))), h('ul', { class: 'reports' }, rows));
+    }
+
+    // The steps whose protocol is open: kept across re-renders, so an open one
+    // follows the agent's new entries as the page reloads.
+    const openProtocols = new Set();
+
+    function stepProtocol(s) {
+      const p = (view.protocols || {})[s.id];
+      if (!p) return null;
+      const body = h('div', { class: 'protocol-body' }, h('p', { class: 'muted small' }, 'loading…'));
+      const when = p.last ? ', last at ' + p.last.slice(11, 16) : '';
+      const det = h('details', { class: 'protocol' },
+        h('summary', { class: 'small' }, `Protocol (${p.entries} ${p.entries === 1 ? 'entry' : 'entries'}${when})`), body);
+      async function fill() {
+        try {
+          const r = await api('GET', `/api/r/${slug}/protocol/${view.id}/${s.id}`);
+          body.replaceChildren(md(r.text, 'protocol-text'));
+        } catch (e) { body.replaceChildren(h('p', { class: 'small' }, 'cannot load the protocol: ' + e.message)); }
+      }
+      det.addEventListener('toggle', () => {
+        if (det.open) { openProtocols.add(s.id); fill(); } else openProtocols.delete(s.id);
+      });
+      if (openProtocols.has(s.id)) { det.open = true; fill(); }
+      return det;
+    }
+
+    function stepReports(s) {
+      // A report about this step, also at the step it is about.
+      const mine = (view.reports || []).filter(r => r.step === s.id && !r.missing);
+      if (!mine.length) return null;
+      return h('div', { class: 'kv step-reports' }, 'reports: ', ...mine.map((r, i) => [i ? ', ' : '',
+        r.broken ? h('span', {}, r.title || r.file, ' ', badge('cannot be read', 'warn'))
+          : h('a', { href: `/r/${slug}/i/${r.id}` }, mdi(r.title))]));
+    }
+
     function stepCard(s, ans) {
       const state = s.state || 'open';
       const tick = (ans.steps || {})[s.id];
@@ -929,8 +979,17 @@
       if (s.commit) meta.push('commit ' + s.commit);
       if (meta.length) li.append(h('div', { class: 'kv' }, meta.join(' · ')));
       if (s.reason) li.append(h('div', { class: 'small' }, h('strong', {}, state + ': '), s.reason));
+      const proto = (view.protocols || {})[s.id];
+      if (state === 'active' && proto && proto.last_note) {
+        // What the agent is doing now, in its own last note.
+        li.append(h('div', { class: 'kv now' }, h('strong', {}, 'now: '), mdi(proto.last_note.split('\n')[0])));
+      }
       if (s.details) li.append(md(s.details, 'small'));
       if (s.done_when) li.append(h('div', { class: 'small muted' }, 'Done when: ', mdi(s.done_when)));
+      const reps = stepReports(s);
+      if (reps) li.append(reps);
+      const protoEl = stepProtocol(s);
+      if (protoEl) li.append(protoEl);
       if (s.gate) {
         const a = (view.approvals || {})[s.id] || { status: 'none' };
         const box = h('div', { class: 'gatebox ' + (a.status === 'approved' ? 'approved' : a.status === 'disapproved' ? 'disapproved' : '') });

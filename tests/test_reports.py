@@ -178,3 +178,79 @@ def test_a_plan_lists_its_reports_and_a_report_names_its_plan(proj, served):
     assert rep["document"].startswith(f"/r/demo/{rid}/report.html?v=")
     status, repo_view, _ = req(served, "GET", "/api/r/demo")
     assert next(i for i in repo_view["items"] if i["id"] == rid)["about"] == "p-4k7x2m"
+
+
+def _plan_reports(proj):
+    from waterrise import service
+    f = folder.read(proj / "planning", proj)
+    return {r["id"] or r["file"]: r for r in service.plan_reports(f, f.get("p-4k7x2m"))}
+
+
+def _about(toml, about):
+    toml.write_text(toml.read_text(encoding="utf-8").replace('# about = "p-xxxxxx"', f'about = "{about}"'),
+                    encoding="utf-8")
+
+
+def test_a_plan_finds_every_report_that_is_its_own(proj):
+    # which, amos 2026-10-24: by the report's about (plan or step), and by the
+    # plan's own related and context.
+    a, _, ra = new_report(proj, "about-plan")
+    _about(a, "p-4k7x2m")
+    s, _, rs = new_report(proj, "about-step")
+    _about(s, "p-4k7x2m/s1-1")
+    n, _, rn = new_report(proj, "named")                  # no about at all
+    o, _, ro = new_report(proj, "other")                  # nothing to do with the plan
+    plan = proj / "planning" / "draft" / "a.toml"
+    plan.write_text(plan.read_text(encoding="utf-8").replace(
+        'why = ', f'related = ["{rn}", "h-zzzzzz"]\nwhy = ', 1), encoding="utf-8")
+    got = _plan_reports(proj)
+    assert got[ra]["links"] == ["about"] and got[ra]["state"] in ("draft", "finished")
+    assert got[rs]["links"] == ["step"] and got[rs]["step"] == "s1-1"
+    assert got[rn]["links"] == ["named"]
+    assert ro not in got
+    assert got["h-zzzzzz"]["missing"] is True
+
+
+def test_a_broken_report_is_listed_with_its_problem_not_left_out(proj):
+    toml, _, rid = new_report(proj)
+    _about(toml, "p-4k7x2m")
+    toml.write_text(toml.read_text(encoding="utf-8") + "\nthis is = not toml [\n", encoding="utf-8")
+    got = _plan_reports(proj)
+    assert got[rid]["broken"] is True and "not valid TOML" in got[rid]["problem"]
+    assert got[rid]["title"] and got[rid]["file"] == "reports/nas-throughput.toml"
+
+
+def test_a_report_about_a_step_the_plan_lacks_is_a_warning(proj):
+    toml, _, rid = new_report(proj)
+    _about(toml, "p-4k7x2m/s9-9")
+    assert ("reports/nas-throughput.toml", "warn", "about = 'p-4k7x2m/s9-9', but p-4k7x2m has no 's9-9'") \
+        in findings(proj)
+    toml.write_text(toml.read_text(encoding="utf-8").replace("s9-9", "s1-1"), encoding="utf-8")
+    assert findings(proj) == []
+
+
+def test_a_plan_naming_a_report_that_does_not_exist_is_an_error(proj):
+    plan = proj / "planning" / "draft" / "a.toml"
+    plan.write_text(plan.read_text(encoding="utf-8").replace('why = ', 'related = ["h-zzzzzz"]\nwhy = ', 1),
+                    encoding="utf-8")
+    assert any("related names 'h-zzzzzz', which does not exist" in m for _, _, m in findings(proj))
+
+
+def test_a_plan_page_is_not_cached_past_a_new_or_changed_report(proj, served):
+    from tests.test_planning_service import req
+
+    def etag():
+        return req(served, "GET", "/api/r/demo/item/p-4k7x2m")[2]["ETag"]
+    before = etag()
+    toml, _, rid = new_report(proj)
+    _about(toml, "p-4k7x2m")
+    after_new = etag()
+    assert after_new != before
+    toml.write_text(toml.read_text(encoding="utf-8").replace('title = "Nas throughput"', 'title = "NAS, again"'),
+                    encoding="utf-8")
+    import os
+    st = toml.stat()
+    os.utime(toml, ns=(st.st_atime_ns, st.st_mtime_ns + 10_000_000))
+    assert etag() != after_new
+    status, plan, _ = req(served, "GET", "/api/r/demo/item/p-4k7x2m")
+    assert [r["title"] for r in plan["reports"]] == ["NAS, again"]

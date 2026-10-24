@@ -31,6 +31,7 @@ STATE_FOLDERS = ("draft", "todo", "in-progress", "done")
 NOTES_FOLDER = "notes"
 REPORTS_FOLDER = "reports"
 ANSWERS_FOLDER = "answers"
+PROTOCOLS_FOLDER = "protocols"      # a step's protocol, never committed (protocol.py)
 SCHEMA_FOLDER = ".schema"
 CONFIG_FILE = "planning.toml"
 

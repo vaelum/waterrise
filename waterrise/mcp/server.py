@@ -95,7 +95,10 @@ Follow the guide and the repository's own rules throughout; this prompt changes 
    - comments: change the plan as asked (or answer in the item), then `waterrise resolve` each;
    - ticked user steps: set them `done`;
    - ready steps: `state = "active"`, do the work, commit, `state = "done"` with `commit`, \
-a `[[log]]` entry, `updated`, `waterrise check`. A gated step only right after \
+a `[[log]]` entry, `updated`, `waterrise check`. Keep the step's protocol as you go: \
+`waterrise note <id> <step> TEXT` before its first command and whenever what you see changes your course, \
+and every command that matters through `waterrise run <id> <step> -- COMMAND ...`, never a hand-built \
+redirect; amos reads it at the step, live. A gated step only right after \
 `waterrise gate <id> <step>` exits 0, with its line quoted; on a closed gate, never work around it;
    - folder moves with `waterrise move`.
    Commit as you go, as the repository's conventions say. Never write `planning/answers/`.

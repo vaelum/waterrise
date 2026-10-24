@@ -24,8 +24,8 @@ from .context import prog, short
 from .folder import Folder, Item
 from .state import (DONE_STEP, decision_local, decision_state, plan_approval, satisfied,
                     step_approval, summarize)
-from .types import (FORMAT, ID_RE, KIND_OF_LETTER, LOCAL_RE, NOTES_FOLDER, REPORTS_FOLDER, STATE_FOLDERS,
-                    Problem)
+from .types import (FORMAT, ID_RE, KIND_OF_LETTER, LOCAL_RE, NOTES_FOLDER, PROTOCOLS_FOLDER, REPORTS_FOLDER,
+                    STATE_FOLDERS, Problem)
 
 # kind -> folders it may be in
 ALLOWED = {
@@ -295,6 +295,10 @@ def _check_report(report: Report, folder: Folder, item: Item, ids: dict[str, Ite
         elif target.kind != "plan":
             report.add(rel, "error", f"about = {about!r} is a {target.kind}; a report is about a plan or the project",
                        item.line_of(Problem("error", "", "about")))
+        elif "/" in about and about.split("/", 1)[1] not in target.locals():
+            # Its plan's page lists it, but at no step.
+            report.add(rel, "warn", f"about = {about!r}, but {target.id} has no {about.split('/', 1)[1]!r}",
+                       item.line_of(Problem("warn", "", "about")))
     doc = report_document(item)
     if not doc.resolve().is_relative_to(item.path.parent.resolve()):
         report.add(rel, "error", f"file = {data.get('file')!r} is outside {REPORTS_FOLDER}/")
@@ -319,6 +323,34 @@ def _check_report(report: Report, folder: Folder, item: Item, ids: dict[str, Ite
         line = text.count("\n", 0, m.start()) + 1
         report.add(shown, "error", "has something that looks like a credential; name the variable or the file "
                                    "instead", line)
+
+
+def _check_protocols(report: Report, folder: Folder, item: Item) -> None:
+    """A warning for a done agent step with no protocol, or none with a note
+    in it (enforce, amos 2026-10-24), and any credential in one. Protocols are
+    never committed, so only a plan worked here has them: one without a
+    protocols folder of its own (a clone, CI, an older plan) is left alone."""
+    base = folder.root / PROTOCOLS_FOLDER / item.id
+    if not base.is_dir():
+        return
+    for s in item.steps():
+        if s.get("by") != "agent" or s.get("state") != "done":
+            continue
+        sid = str(s.get("id"))
+        path = base / f"{sid}.md"
+        line = item.line_of(Problem("warn", "", local=sid))
+        if not path.is_file():
+            report.add(item.rel, "warn", f"step {sid} is done, but has no protocol "
+                                         f"({short()} note / {short()} run {item.id} {sid})", line)
+        elif " note\n" not in path.read_text(encoding="utf-8", errors="replace"):
+            report.add(item.rel, "warn", f"step {sid} is done, but its protocol has no note: what was done, and why",
+                       line)
+    for path in sorted(base.glob("*.md")):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for m in CREDENTIAL.finditer(text):
+            report.add(path.relative_to(folder.root).as_posix(), "error",
+                       "has something that looks like a credential; remove it from the protocol",
+                       text.count("\n", 0, m.start()) + 1)
 
 
 def _check_item_content(report: Report, item: Item, ids: dict[str, Item], ans: dict, today) -> None:
@@ -549,6 +581,8 @@ def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> R
                                  and ID_RE.match(r)]
         if it.kind == "report":
             _check_report(report, folder, it, ids)
+        if it.kind == "plan" and it.id:
+            _check_protocols(report, folder, it)
 
     claimed = {report_document(it).relative_to(folder.root).as_posix()
                for it in folder.items if it.parsed and it.kind == "report"

@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import answers as answers_mod
-from .types import (ANSWERS_FOLDER, CONFIG_FILE, NOTES_FOLDER, REPORTS_FOLDER, SCHEMA_FOLDER, STATE_FOLDERS,
-                    Problem, load, load_config)
+from .types import (ANSWERS_FOLDER, CONFIG_FILE, NOTES_FOLDER, PROTOCOLS_FOLDER, REPORTS_FOLDER, SCHEMA_FOLDER,
+                    STATE_FOLDERS, Problem, load, load_config)
 
 _TOML_LINE = re.compile(r"\(at line (\d+), column (\d+)\)")
 
@@ -241,6 +241,8 @@ def read(root: Path, repo: Path | None = None) -> Folder:
             for a in sorted(entry.glob("*.json")):
                 f.answer_files[a.stem] = a
             continue
+        if name == PROTOCOLS_FOLDER and entry.is_dir():
+            continue                    # the steps' protocols; protocol.py reads them
         if entry.is_dir() and name in (*STATE_FOLDERS, NOTES_FOLDER, REPORTS_FOLDER):
             for p in sorted(entry.rglob("*")):
                 if not p.is_file() or p.name.startswith("."):

@@ -91,7 +91,9 @@ from . import check as check_mod
 from . import folder as folder_mod
 from .client import API, HEADER, SERVICE
 from .state import decision_local, plan_approval, satisfied, step_approval, summarize
-from .types import ID_RE, STATE_FOLDERS, jsonable, plan_hash, plan_snapshot, step_hash, step_snapshot
+from . import protocol as protocol_mod
+from .types import (ID_RE, LOCAL_RE, PROTOCOLS_FOLDER, REPORTS_FOLDER, STATE_FOLDERS, jsonable, plan_hash,
+                    plan_snapshot, step_hash, step_snapshot)
 
 STATIC = Path(__file__).resolve().parent / "static"
 ASSETS = ("app.css", "app.js", "events.js", "marked.min.js", "marked.LICENSE.md",
@@ -291,6 +293,58 @@ def _needs(it: folder_mod.Item) -> list[str]:
             if isinstance(r, str) and ID_RE.match(r.split("/", 1)[0])]
 
 
+# What a broken sidecar still says plainly: read with a pattern, not TOML, so a
+# typo elsewhere in the file doesn't take the report off its plan's page.
+_RAW_FIELD = {k: re.compile(rf'^\s*{k}\s*=\s*"([^"\n]*)"', re.M) for k in ("id", "about", "title")}
+
+
+def _raw(text: str, key: str) -> str:
+    m = _RAW_FIELD[key].search(text)
+    return m.group(1) if m else ""
+
+
+def plan_reports(f: folder_mod.Folder, plan: folder_mod.Item) -> list[dict]:
+    """Every report that belongs to `plan`, for its page (which, amos
+    2026-10-24): those whose `about` names it or one of its steps, and those
+    the plan names in `related` or `context`. A sidecar that doesn't parse is
+    listed as broken, never left out; a report the plan names that doesn't
+    exist is listed as missing."""
+    named = {}
+    for key in ("related", "context"):
+        refs = plan.data.get(key) or []
+        for ref in refs if isinstance(refs, list) else []:
+            if isinstance(ref, str) and ref.startswith("h-"):
+                named.setdefault(ref.split("/", 1)[0], key)
+    out, seen = [], set()
+    for r in f.items:
+        if r.folder != REPORTS_FOLDER or not r.rel.endswith(".toml"):
+            continue
+        rid = r.id if r.parsed else _raw(r.text, "id")
+        about = str(r.data.get("about") or "") if r.parsed else _raw(r.text, "about")
+        links = []
+        if about.split("/", 1)[0] == plan.id:
+            links.append("step" if "/" in about else "about")
+        if rid in named:
+            links.append("named")
+        if not links:
+            continue
+        seen.add(rid)
+        entry = {"id": rid or None, "links": links, "step": about.split("/", 1)[1] if "/" in about else None,
+                 "file": r.rel, "broken": not r.parsed}
+        if r.parsed:
+            entry |= {"title": r.title, "summary": r.data.get("summary", ""),
+                      "updated": jsonable(r.data.get("updated")), "state": r.data.get("state", "finished")}
+        else:
+            entry |= {"title": _raw(r.text, "title") or r.name,
+                      "problem": next((p.message for p in r.problems), "cannot be read")}
+        out.append(entry)
+    for rid, key in named.items():
+        if rid not in seen:
+            out.append({"id": rid, "links": ["named"], "missing": True, "file": None, "broken": False,
+                        "title": None, "step": None, "named_in": key})
+    return out
+
+
 def item_view(entry: dict, item_id: str) -> dict | None:
     f = _folder(entry)
     it = f.get(item_id)
@@ -315,10 +369,8 @@ def item_view(entry: dict, item_id: str) -> dict | None:
                      if x.file in (it.rel, f"answers/{it.id}.json") and x.level != "info"],
     }
     if it.kind == "plan":
-        view["reports"] = [{"id": r.id, "title": r.title, "summary": r.data.get("summary", ""),
-                            "updated": jsonable(r.data.get("updated"))}
-                           for r in f.items if r.parsed and r.kind == "report"
-                           and str(r.data.get("about") or "").split("/")[0] == it.id]
+        view["reports"] = plan_reports(f, it)
+        view["protocols"] = protocol_mod.summaries(f.root, it.id)
     if it.kind == "report":
         doc = check_mod.report_document(it)
         version = int(doc.stat().st_mtime) if doc.is_file() else 0
@@ -506,11 +558,30 @@ class Handler(BaseHTTPRequestHandler):
                 it = fold.get(api[3])
                 if it is None:
                     return self._error(404, "no such item")
-                tag = _etag(it.path, fold.answers_path(it.id), f)
+                paths = [it.path, fold.answers_path(it.id), f]
+                if it.kind == "plan":
+                    # Its page lists its reports and its steps' protocols: a
+                    # new, changed or removed one must not be answered with a 304.
+                    reports = f / REPORTS_FOLDER
+                    protocols = f / PROTOCOLS_FOLDER / it.id
+                    paths += [reports, *sorted(reports.glob("*.toml")), protocols, *sorted(protocols.glob("*.md"))]
+                tag = _etag(*paths)
                 if self.headers.get("If-None-Match") == tag:
                     return self._send(304, extra={"ETag": tag})
                 view = item_view(entry, api[3])
                 return self._json(200, view, {"ETag": tag})
+            if len(api) == 5 and api[2] == "protocol":
+                # A step's protocol, as text: read-only, and only a name the
+                # pattern allows, so nothing outside protocols/ can be asked for.
+                if not ID_RE.match(api[3]) or not LOCAL_RE.match(api[4]):
+                    return self._error(404, "no such protocol")
+                path = protocol_mod.path_for(Path(entry["planning"]), api[3], api[4])
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    return self._error(404, "no such protocol")
+                return self._json(200, {"text": text, "summary": protocol_mod.summary(path)},
+                                  {"ETag": _etag(path)})
             if len(api) >= 4 and api[2] == "file":
                 return self._file(api[1], api[3:], raw=False)
         return self._error(404, "not found")

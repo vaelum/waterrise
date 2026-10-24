@@ -45,7 +45,12 @@ and is the same thing; below, `waterrise` stands for either.
    `state`, `commit`, `reason` and the `[[log]]` without asking again.
 7. After every change, run `waterrise check`. Move items with
    `waterrise move <id> <folder>`, never a bare `git mv`.
-8. If `waterrise` is not installed, say so and give the install command
+8. **Every agent step keeps a protocol:** `waterrise note <id> <step> TEXT`
+   before its first command (what and why) and whenever what you see changes
+   your course, and every command that matters through
+   `waterrise run <id> <step> -- COMMAND ...`, never a hand-built redirect.
+   amos reads it at the step, live; the `[[log]]` stays the summary.
+9. If `waterrise` is not installed, say so and give the install command
    (`git clone https://github.com/vaelum/waterrise.git && cd waterrise &&
    python3 -m waterrise install`); install it only when asked. A butler
    project pinned to a 0.x version runs its own older planning code under
@@ -65,6 +70,8 @@ and is the same thing; below, `waterrise` stands for either.
 | `move ID FOLDER` | move it, after checking the target folder's rules |
 | `gate ID [STEP]` | exit 0 only on amos's current approval |
 | `resolve ID COMMENT --note TEXT` | mark amos's comment handled |
+| `note ID STEP TEXT` | a dated note in the step's protocol |
+| `run ID STEP -- COMMAND ...` | a command, its output into the step's protocol |
 | `convert FILE` | a typed skeleton from a Markdown plan or an old HTML form |
 | `serve` | start or join the one local service, register this repository, print the URL |
 | `service [status\|stop\|restart\|logs]` | the service itself |

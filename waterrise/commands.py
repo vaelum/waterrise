@@ -6,6 +6,7 @@ works without the service. Only serve, service and forget talk to it.
 
 from __future__ import annotations
 
+import argparse
 import datetime as _dt
 import json
 import os
@@ -133,7 +134,7 @@ def cmd_init(ctx: Ctx, args) -> int:
     ignore = root / ".gitignore"
     if not ignore.exists():
         # The answers files are committed; the locks beside them are not.
-        ignore.write_text("answers/.*.lock\n", encoding="utf-8", newline="\n")
+        ignore.write_text("answers/.*.lock\nprotocols/\n", encoding="utf-8", newline="\n")
     _write_schema(root)
     ui.ok("typed planning folder", f"{ctx.disp(root)}: {', '.join(todo)}")
     ui.note(f"next: {prog()} new plan <name>")
@@ -526,6 +527,46 @@ def cmd_resolve(ctx: Ctx, args) -> int:
     return 0
 
 
+def _agent_step(f: folder_mod.Folder, item_id: str, step: str) -> folder_mod.Item:
+    """The plan and its agent step a protocol belongs to, or an error naming what is wrong."""
+    it = _item(f, item_id)
+    if it.kind != "plan":
+        raise WaterriseError(f"{it.id} is a {it.kind}; protocols belong to a plan's steps")
+    s = next((s for s in it.steps() if s.get("id") == step), None)
+    if s is None:
+        raise WaterriseError(f"{it.id} has no step {step}",
+                             hint="its steps: " + ", ".join(str(x.get("id")) for x in it.steps()))
+    if s.get("by") != "agent":
+        raise WaterriseError(f"{it.id}/{step} is the user's; protocols are the agent's",
+                             hint="the user reports on their steps in comments")
+    return it
+
+
+def cmd_note(ctx: Ctx, args) -> int:
+    from . import protocol
+    f = _typed(ctx)
+    it = _agent_step(f, args.id, args.step)
+    text = " ".join(args.text) if args.text and args.text != ["-"] else sys.stdin.read()
+    if not text.strip():
+        raise WaterriseError("nothing to note", hint=f"{prog()} note {it.id} {args.step} TEXT, or the text on stdin")
+    if ctx.would(f"note in {ctx.disp(protocol.path_for(f.root, it.id, args.step))}"):
+        return 0
+    protocol.Protocol(f.root, it.id, args.step).note(text)
+    return 0
+
+
+def cmd_run(ctx: Ctx, args) -> int:
+    from . import protocol
+    f = _typed(ctx)
+    it = _agent_step(f, args.id, args.step)
+    argv = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not argv:
+        raise WaterriseError("no command to run", hint=f"{prog()} run {it.id} {args.step} -- COMMAND ...")
+    if ctx.would(f"run {' '.join(argv)} into {ctx.disp(protocol.path_for(f.root, it.id, args.step))}"):
+        return 0
+    return protocol.Protocol(f.root, it.id, args.step).run(argv)
+
+
 def _state_and_subdir(src: Path, root: Path) -> tuple[str, str]:
     """The state folder a source sits in, and the subfolders below it: done/coverage/x.md → done, coverage."""
     try:
@@ -820,6 +861,14 @@ def nodes() -> list[Node]:
              args=[arg("id"), arg("comment", help="c1, c2, …"),
                    arg("--note", required=True, help="what was done about it")],
              func=cmd_resolve),
+        Node("note", "add a dated note to an agent step's protocol",
+             args=[arg("id"), arg("step"),
+                   arg("text", nargs="*", help="the note; none or - reads it from stdin")],
+             func=cmd_note),
+        Node("run", "run a command for an agent step, its output into the step's protocol and the terminal",
+             args=[arg("id"), arg("step"),
+                   arg("command", nargs=argparse.REMAINDER, help="-- COMMAND [ARG ...]")],
+             func=cmd_run),
         Node("convert", "a typed skeleton from a Markdown plan or a prototype HTML form (with its answers)",
              args=[arg("file")], func=cmd_convert),
         Node("schema", "write the JSON Schema editors validate against", func=cmd_schema),

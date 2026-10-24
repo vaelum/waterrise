@@ -23,8 +23,9 @@ planning/
   notes/          context several items share; `state` in the file: draft or finished
   reports/        HTML reports and their sidecars (`<name>.toml` + `<name>.html`); `state` as notes
   answers/        <id>.json: the user's answers and approvals — never yours to write
+  protocols/      <plan id>/<step>.md: what was noted and run for each step; never committed
   .schema/        the JSON Schema editors validate against (`waterrise schema`)
-  .gitignore      keeps the answers' lock files out of git (`waterrise init` writes it)
+  .gitignore      keeps the answers' lock files and protocols/ out of git (`waterrise init` writes it)
 ```
 
 - **The folder is the state.** Move an item with
@@ -61,8 +62,12 @@ writes the item from its template with a fresh id. Fill it in, then run
 anything longer than a `[[section]]` should be, write a report instead of
 prose in a plan. `waterrise new report <name>` makes the pair in `reports/`:
 the sidecar (`h-…`, its title and summary, and `about = "p-…"` for the plan it
-reports on, or nothing for one about the project) and a starter document that
-passes `check`. The document is one HTML file with everything inline: its
+reports on, `about = "p-…/s2-1"` for one of its steps, or nothing for one about
+the project) and a starter document that passes `check`. A plan's page lists
+its reports first, under its summary: every report whose `about` names the plan
+or one of its steps (that one also at the step), and every report the plan
+names in its `related` or `context`. A report whose sidecar can't be read is
+shown there with its problem, never left out. The document is one HTML file with everything inline: its
 CSS, its script, its data and its images (inline SVG or `data:` URLs). The
 page shows it in a sandboxed frame that loads nothing remote, so a CDN script,
 a web font or a remote image would not load, and `check` refuses them; a
@@ -203,6 +208,23 @@ During implementation, after each step:
 `waterrise status` is where to look first when you pick an item up: it lists
 what waits on the user and what waits on you.
 
+**Every agent step keeps a protocol** in `protocols/<plan id>/<step>.md`,
+which the user reads at the step in the page, live, while you work:
+
+- before the step's first command, `waterrise note <id> <step> TEXT`: what
+  you are about to do, and why;
+- every command whose output matters (tests, builds, installs, checks,
+  anything that can fail) through `waterrise run <id> <step> -- COMMAND ...`:
+  its output goes to your terminal and to the protocol as it comes, with its
+  exit status; never hand-build a redirect into the file;
+- a note whenever what you saw changes what you do next, and a closing note
+  when the step is done.
+
+The protocol is the detail; the `[[log]]` entry stays the summary. Values in
+`~/.secrets` are masked before anything is written, but don't run commands
+that print credentials. On Windows, `run` starts the command as given: a shell
+built-in needs `-- cmd /c ...` or `-- powershell -Command ...`.
+
 ## 9. Commands
 
 | command | does |
@@ -217,6 +239,8 @@ what waits on the user and what waits on you.
 | `waterrise move ID FOLDER` | move it, after checking the folder's rules |
 | `waterrise gate ID [STEP]` | exit 0 only if approved and unchanged |
 | `waterrise resolve ID COMMENT --note TEXT` | mark a comment handled |
+| `waterrise note ID STEP TEXT` | a dated note in the step's protocol (TEXT from stdin if none) |
+| `waterrise run ID STEP -- COMMAND ...` | run a command, its output into the step's protocol and the terminal |
 | `waterrise convert FILE` | a skeleton from a Markdown plan or an old HTML form |
 | `waterrise serve [--open]` | start or join the local service, register this repository, print the URL |
 | `waterrise service [status\|stop\|restart\|logs\|run]` | the service itself |

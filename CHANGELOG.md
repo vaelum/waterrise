@@ -7,6 +7,33 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.10.5]
+
+### Added
+
+- **A protocol for every step.** `waterrise note <id> <step> TEXT` adds a dated
+  note to an agent step's protocol, and `waterrise run <id> <step> -- COMMAND`
+  runs a command with its output going to the terminal and the protocol as it
+  comes, then its exit status and duration. Protocols live in
+  `planning/protocols/<plan>/<step>.md` and are never committed (`init` and the
+  first note add `protocols/` to the planning folder's `.gitignore`). A file
+  stops growing at 5 MB, where a command keeps its last 50 lines; values from
+  `~/.secrets` and credential-like environment variables are masked. The
+  guide, the planning skill and the work-plan prompt tell agents to keep one;
+  `check` warns about a done agent step without one, and errs on a credential
+  in one. A plan's page shows each step's protocol at the step, live, and an
+  active step's last note as "now".
+
+### Changed
+
+- **A plan's page shows its reports first**, under the summary, and every one
+  of them: those whose `about` names the plan or one of its steps (shown at
+  the step too), and those the plan names in `related` or `context`. A report
+  whose sidecar doesn't parse is listed with its problem instead of
+  disappearing, and one the plan names that doesn't exist is listed as
+  missing. The open page follows new and changed reports live.
+- `check` warns about a report whose `about` names a step its plan doesn't have.
+
 ## [2026.10.4]
 
 ### Added

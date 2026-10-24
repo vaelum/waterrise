@@ -14,7 +14,7 @@ from .errors import WaterriseError
 # The commands after which a central project's folder is committed in the
 # central repository. `check` is one: the guide has agents run it after every
 # edit of an item, so their edits get a commit too.
-WRITES = ("init", "new", "move", "resolve", "convert", "schema", "check")
+WRITES = ("init", "new", "move", "resolve", "convert", "schema", "check", "note", "run")
 
 
 def _global_flags() -> argparse.ArgumentParser:
