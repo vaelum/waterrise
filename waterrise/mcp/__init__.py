@@ -1,12 +1,12 @@
 """work-plan: an MCP server that lets an agent keep working a plan to the end.
 
 The problem it solves: an agent working a plan in `planning/` stops at every
-point that needs amos (a decision, an approval, a comment to answer, a step of
-amos's own) and ends its turn, and amos has to come back to the chat to say
+point that needs the user (a decision, an approval, a comment to answer, a step of
+the user's own) and ends its turn, and the user has to come back to the chat to say
 "go on". This server gives the agent a tool that *waits*: `wait_for_plan`
-blocks until amos has done something in the planning page that the agent can
+blocks until the user has done something in the planning page that the agent can
 act on, and returns what that is. An agent started with the `work_plan` prompt
-loops work → wait → work until the plan is done, so amos answers in the page
+loops work → wait → work until the plan is done, so the user answers in the page
 and never in the chat.
 
 What it reads, and what it does not:
@@ -38,7 +38,7 @@ from .. import client
 from ..install import command
 
 # How often a wait asks `planning status`. One status is a fraction of a second
-# of Python; amos clicking is minutes apart.
+# of Python; the user clicking is minutes apart.
 POLL_SECONDS = float(os.environ.get("WORK_PLAN_POLL_SECONDS", "15"))
 
 # How long one wait blocks before it returns "nothing yet" and the agent calls
@@ -141,7 +141,7 @@ def _find_in(planning: Path, item_id: str) -> bool:
 
 
 def resolve(spec: str, cwd: Path | None = None) -> Plan:
-    """A plan from what amos typed: `p-xxxxxx`, `repo:p-xxxxxx`, or the path
+    """A plan from what the user typed: `p-xxxxxx`, `repo:p-xxxxxx`, or the path
     to the plan's TOML file."""
     spec = spec.strip()
     if not spec:
@@ -232,7 +232,7 @@ _urls: dict[Path, str] = {}
 
 def page_url(plan: Plan) -> str | None:
     """The item's page. `serve` starts the service if it is down,
-    which is what amos needs to answer at all; its URL is cached per repo."""
+    which is what the user needs to answer at all; its URL is cached per repo."""
     base = _urls.get(plan.repo)
     if base is None:
         out = _waterrise(plan, "serve")
@@ -264,7 +264,7 @@ class Assessment:
             out.append("For you, now:")
             out += [f"  - {a}" for a in self.agent]
         if self.user:
-            out.append("Waiting on amos:")
+            out.append("Waiting on the user:")
             out += [f"  - {u}" for u in self.user]
         return out
 
@@ -288,7 +288,7 @@ def assess(st: dict) -> Assessment:
 
     whats = {x["what"] for x in st.get("for_user", [])}
     open_steps = st.get("open", [])
-    # A draft's steps start once amos has approved it and it has moved to
+    # A draft's steps start once the user has approved it and it has moved to
     # todo; until then the work in it is answers, comments and the move.
     for s in [] if folder == "draft" else open_steps:
         if s.get("by") != "agent" or not s.get("ready") or s.get("state") not in ("open", "active"):
@@ -310,7 +310,7 @@ def assess(st: dict) -> Assessment:
 
 
 def fingerprint(st: dict) -> tuple:
-    """What amos has done so far, as far as it shows in status. A wait ends
+    """What the user has done so far, as far as it shows in status. A wait ends
     when this changes even if no new work came of it (an approval of a step
     that still waits on another, say), so the agent can look."""
     return (
@@ -344,7 +344,7 @@ def tool_status(spec: str, cwd: Path | None) -> str:
     st = status(plan)
     a = assess(st)
     head = {"work": "WORK: there is something for you to do now.",
-            "waiting": "WAITING: everything left waits on amos; call wait_for_plan.",
+            "waiting": "WAITING: everything left waits on the user; call wait_for_plan.",
             "done": "DONE: the plan is in done/."}[a.verdict]
     return describe(plan, st, a, page_url(plan), head)
 
@@ -386,10 +386,10 @@ def tool_wait(spec: str, cwd: Path | None, minutes: float | None,
         if a.verdict == "done":
             return describe(plan, st, a, url, "DONE: the plan moved to done/.")
         if a.verdict == "work":
-            return describe(plan, st, a, url, "AMOS ACTED: there is something for you to do now.")
+            return describe(plan, st, a, url, "USER ACTED: there is something for you to do now.")
         if fingerprint(st) != before:
             return describe(plan, st, a, url,
-                            "CHANGED: amos did something in the page, but nothing is ready for you yet. "
+                            "CHANGED: the user did something in the page, but nothing is ready for you yet. "
                             "Look, then wait again.")
     return describe(plan, st, a, url,
-                    f"NOTHING YET after {minutes:g} min: still waiting on amos. Call wait_for_plan again.")
+                    f"NOTHING YET after {minutes:g} min: still waiting on the user. Call wait_for_plan again.")

@@ -27,4 +27,6 @@ each kind of item, the four ways of working, approvals, and the reference
 tables generated from waterrise's own types. It is also in the repository as
 `waterrise/GUIDE.md`.
 
-waterrise is MIT-licensed.
+waterrise is free software under the GNU Affero General Public License,
+version 3 only (AGPL-3.0-only). If you run a changed waterrise for other
+people over a network, you must offer them its source.

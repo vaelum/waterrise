@@ -67,8 +67,8 @@ waterrise serve        # the pages
 ## Releasing
 
 `python3 butler.py release <version>` (see `butler/butler.toml`). CI runs the
-suite on Linux only, so before each release it runs on Windows too, in the
-test VM on amos-pc (`tools/windows-vm/`, kept out of this mirror):
+suite on Linux only, so before each release it runs on Windows too, in a
+Windows test VM (`tools/windows-vm/`, kept out of this mirror):
 
 ```
 python3 butler.py windows-test --e2e
@@ -79,3 +79,18 @@ user, failing if anything appeared in the real profile; then `install --boot`,
 a reboot, the service answering after logon, and `install --uninstall`. On a
 Windows machine of your own, the suite alone is
 `py -3 -m venv .venv; .venv\Scripts\pip install -e ".[dev]"; .venv\Scripts\python -m pytest -q`.
+
+## License
+
+Copyright (c) 2026 Amos
+
+waterrise is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, version 3 of the License only (AGPL-3.0-only). It is
+distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See [LICENSE](LICENSE) for the full text.
+
+`waterrise/static/marked.min.js` is under the MIT License
+(`marked.LICENSE.md`) and the Geist fonts under the SIL Open Font License
+(`geist.LICENSE.txt`).

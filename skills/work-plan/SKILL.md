@@ -1,6 +1,6 @@
 ---
 name: work-plan
-description: Work a plan to the end while amos answers in its planning page — `/work-plan <plan>`, the short name for the work-plan MCP server's `work_plan` prompt.
+description: Work a plan to the end while the user answers in its planning page — `/work-plan <plan>`, the short name for the work-plan MCP server's `work_plan` prompt.
 argument-hint: <plan>
 disable-model-invocation: true
 ---

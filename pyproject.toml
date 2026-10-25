@@ -12,7 +12,8 @@ readme = "README.md"
 # 3.11 for tomllib; stdlib only, so `python -m waterrise install` runs from a
 # checkout on a bare interpreter.
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
 dependencies = []
 
 [project.optional-dependencies]

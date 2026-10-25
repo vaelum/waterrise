@@ -159,7 +159,7 @@ def test_wait_ends_when_amos_answers(fake):
     fake += [WAITING, WAITING, _status(for_agent=[("answer", "how", "How?")])]
     clock = Clock()
     out = workplan.tool_wait("p-abc123", None, 5, clock=clock, sleep=clock.sleep, poll=10)
-    assert out.startswith("AMOS ACTED")
+    assert out.startswith("USER ACTED")
     assert "answer how" in out
     assert clock.t == 20
 

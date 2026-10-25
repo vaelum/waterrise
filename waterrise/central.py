@@ -8,8 +8,8 @@ its own (central-home, amos, 2026-10-18).
 A project's home is in waterrise's registry only (mode-record): nothing in
 the project's repository says that it plans here. waterrise creates the
 repository on first use and commits a project's folder after every command
-that writes it, the page's answers included, so the record of what amos
-approved has a history; pushing it somewhere is amos's.
+that writes it, the page's answers included, so the record of what the user
+approved has a history; pushing it somewhere is the user's.
 """
 
 from __future__ import annotations

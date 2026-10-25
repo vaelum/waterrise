@@ -32,13 +32,13 @@ VERSION = "1"
 PROTOCOLS = ("2025-06-18", "2025-03-26", "2024-11-05")
 
 INSTRUCTIONS = """\
-Works a plan (`planning/` in amos's repositories, read by waterrise) to the end without amos \
-coming back to the chat. `plan_status` says what is for you and what waits on amos; \
-`wait_for_plan` blocks until amos acts in the planning page. Start with the \
+Works a plan (`planning/` in a repository, read by waterrise) to the end without the user \
+coming back to the chat. `plan_status` says what is for you and what waits on the user; \
+`wait_for_plan` blocks until the user acts in the planning page. Start with the \
 `work_plan` prompt, or follow it: work, wait, work, until the plan is done."""
 
 PLAN_ARG = {"type": "string",
-            "description": "The plan: its id (p-xxxxxx), repo:id (e.g. infra-homeserver:p-32a9sd), "
+            "description": "The plan: its id (p-xxxxxx), repo:id (e.g. myapp:p-32a9sd), "
                            "or the path to its TOML file."}
 
 TOOLS = [
@@ -46,19 +46,19 @@ TOOLS = [
         "name": "plan_status",
         "title": "Plan status",
         "description": "What a plan needs now: the steps, answers, comments and moves that are "
-                       "for you, what waits on amos, and the plan's page. Reads `waterrise status`; "
+                       "for you, what waits on the user, and the plan's page. Reads `waterrise status`; "
                        "changes nothing.",
         "inputSchema": {"type": "object", "properties": {"plan": PLAN_ARG}, "required": ["plan"]},
         "annotations": {"readOnlyHint": True, "openWorldHint": False},
     },
     {
         "name": "wait_for_plan",
-        "title": "Wait for amos",
-        "description": "Block until amos does something in the plan's page that you can act on (answers "
+        "title": "Wait for the user",
+        "description": "Block until the user does something in the plan's page that you can act on (answers "
                        "a decision, approves or disapproves a gate or the plan, ticks a step, comments), "
                        "then return it. Returns at once if there is already work for you. After "
                        "`minutes` with nothing new it returns NOTHING YET: call it again. Use this "
-                       "instead of ending your turn or asking amos in chat.",
+                       "instead of ending your turn or asking the user in chat.",
         "inputSchema": {"type": "object", "properties": {
             "plan": PLAN_ARG,
             "minutes": {"type": "number", "minimum": 0, "maximum": workplan.MAX_WAIT_MINUTES,
@@ -72,17 +72,17 @@ PROMPT = {
     "name": "work_plan",
     "title": "Work a plan to the end",
     "description": "Work a plan continuously: do every step you can, then wait in the planning "
-                   "page for amos's answers, approvals and comments, and carry on — no chat needed.",
+                   "page for the user's answers, approvals and comments, and carry on — no chat needed.",
     "arguments": [{"name": "plan", "description": PLAN_ARG["description"], "required": True}],
 }
 
 
 def prompt_text(plan: str) -> str:
     return f"""\
-Work the plan `{plan}` to the end, without amos having to come back to this chat.
+Work the plan `{plan}` to the end, without the user having to come back to this chat.
 
-amos talks to you only through the plan's page (decisions, approvals, ticks, comments). \
-You talk to amos only through the plan file. So this is one long loop:
+The user talks to you only through the plan's page (decisions, approvals, ticks, comments). \
+You talk to the user only through the plan file. So this is one long loop:
 
 1. Load the `planning` skill and run `waterrise guide`. Run every planning command as \
 `waterrise <command>` in the plan's repository (`plan_status` names it); in a butler \
@@ -91,35 +91,35 @@ Follow the guide and the repository's own rules throughout; this prompt changes 
 2. Call the `plan_status` tool with plan `{plan}`.
 3. If it says WORK, do all of it, in this order:
    - answers: act on each answered decision, then record `resolved`, `outcome`, `resolved_on`;
-   - disapprovals: drop the step with amos's note as `reason`, or rewrite it (which asks again);
+   - disapprovals: drop the step with the user's note as `reason`, or rewrite it (which asks again);
    - comments: change the plan as asked (or answer in the item), then `waterrise resolve` each;
    - ticked user steps: set them `done`;
    - ready steps: `state = "active"`, do the work, commit, `state = "done"` with `commit`, \
 a `[[log]]` entry, `updated`, `waterrise check`. Keep the step's protocol as you go: \
 `waterrise note <id> <step> TEXT` before its first command and whenever what you see changes your course, \
 and every command that matters through `waterrise run <id> <step> -- COMMAND ...`, never a hand-built \
-redirect; amos reads it at the step, live. A gated step only right after \
+redirect; the user reads it at the step, live. A gated step only right after \
 `waterrise gate <id> <step>` exits 0, with its line quoted; on a closed gate, never work around it;
    - folder moves with `waterrise move`.
    Commit as you go, as the repository's conventions say. Never write `planning/answers/`.
-   Keep the page current: amos watches it live, and it shows only what is in the file. \
+   Keep the page current: the user watches it live, and it shows only what is in the file. \
 Write each change the moment it happens, never saved up for the end of a phase or of \
 the session: `active` when you start a step, `done` with its `commit` and `[[log]]` \
 entry as soon as it is finished and before you start the next, a ticked user step \
 `done` as soon as you see it, a resolved decision or comment the same way, and \
 `waterrise check` after every edit.
-4. Anything you need from amos becomes part of the plan, never a chat question: a new \
+4. Anything you need from the user becomes part of the plan, never a chat question: a new \
 `[[decision]]` placed in the `needs` of the steps it holds up, a `gate = true` on a risky \
-step, a user step for what only amos can do. If a step cannot go on for a reason \
+step, a user step for what only the user can do. If a step cannot go on for a reason \
 outside the plan, set it `blocked` with a `reason` and add what would unblock it.
-5. When `plan_status` says WAITING, tell amos once, briefly, what you need and give the \
+5. When `plan_status` says WAITING, tell the user once, briefly, what you need and give the \
 page URL (send a push notification too if you have a tool for it). Then call \
 `wait_for_plan` with plan `{plan}`.
-   - AMOS ACTED or CHANGED: go back to 2.
+   - USER ACTED or CHANGED: go back to 2.
    - NOTHING YET: call `wait_for_plan` again, at once, without writing anything. Do not \
-end your turn because amos is quiet; waiting is the job.
+end your turn because the user is quiet; waiting is the job.
    - ERROR: look at it, fix what is yours to fix, and wait again.
-6. Stop only when the plan is DONE (summarise what was done, with commits), or amos tells \
+6. Stop only when the plan is DONE (summarise what was done, with commits), or the user tells \
 you to stop in a comment or here.
 
 Keep chat output short: one line per finished step or handled answer. The detail \
@@ -200,7 +200,7 @@ class Server:
             if token is not None:
                 self.send({"jsonrpc": "2.0", "method": "notifications/progress",
                            "params": {"progressToken": token, "progress": round(done),
-                                      "total": round(total), "message": "waiting on amos"}})
+                                      "total": round(total), "message": "waiting on the user"}})
         try:
             if name == "plan_status":
                 text = workplan.tool_status(args.get("plan", ""), self.cwd)

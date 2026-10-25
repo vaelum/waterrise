@@ -48,5 +48,4 @@ claude mcp add --scope user work-plan -- python3 "$PWD/waterrise/mcp/server.py"
 ```
 
 The work-plan skill runs the server from its own folder's checkout, so link
-it rather than copy it. The skills are written for their author's own setup
-and name them throughout; edit your copies to taste.
+it rather than copy it.

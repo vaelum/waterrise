@@ -7,6 +7,24 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.10.7]
+
+### Changed
+
+- **waterrise is now under the GNU Affero General Public License, version 3
+  only (AGPL-3.0-only)**, no longer MIT. You may use, change and share it
+  under the AGPL's terms; if you run a changed waterrise for other people
+  over a network, you must offer them its source. The earlier releases have
+  been withdrawn, and this is the only one. The bundled marked.js (MIT) and
+  Geist fonts (SIL OFL) keep their own licences.
+- **Agents are told about "the user".** The planning and work-plan skills,
+  the work-plan prompt, and the MCP tools' titles and descriptions no longer
+  name their author. The status lines follow: `AMOS ACTED` is now
+  `USER ACTED`, and "waiting on amos" is "waiting on the user". An agent
+  loop that matches on the old words needs the new ones.
+- The README and the MCP server's plan-reference example name no machine or
+  repository of the author's.
+
 ## [2026.10.6]
 
 Only the documentation changes in this release; nothing to update but the
