@@ -130,16 +130,24 @@ def test_note_and_run_write_the_steps_protocol(proj):
 def test_a_long_running_command_is_in_the_protocol_before_it_ends(proj):
     env = {**os.environ, "WATERRISE_PROJECT": str(proj), "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
     # The words are built at run time: the command line itself is in the protocol.
-    code = "import sys, time; print('fir' + 'st', flush=True); time.sleep(3); print('la' + 'st')"
+    # The command prints its last line only once the test says so, not after a
+    # while: a loaded machine takes seconds to start Python twice.
+    go = proj / "go"
+    code = ("import os, sys, time; print('fir' + 'st', flush=True)\n"
+            f"while not os.path.exists({str(go)!r}): time.sleep(0.05)\n"
+            "print('la' + 'st')")
     p = subprocess.Popen([sys.executable, "-m", "waterrise", "run", "p-4k7x2m", "s1-2", "--", sys.executable, "-c", code],
                          cwd=proj, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
     path = proj / "planning" / "protocols" / "p-4k7x2m" / "s1-2.md"
     import time
-    deadline = time.monotonic() + 2.5
-    while time.monotonic() < deadline and not (path.exists() and "first" in path.read_text(encoding="utf-8")):
-        time.sleep(0.05)
-    assert "first" in path.read_text(encoding="utf-8") and "last" not in path.read_text(encoding="utf-8")
-    assert p.wait(30) == 0 and "last" in path.read_text(encoding="utf-8")
+    deadline = time.monotonic() + 60
+    try:
+        while time.monotonic() < deadline and not (path.exists() and "first" in path.read_text(encoding="utf-8")):
+            time.sleep(0.05)
+        assert "first" in path.read_text(encoding="utf-8") and "last" not in path.read_text(encoding="utf-8")
+    finally:
+        go.touch()
+    assert p.wait(60) == 0 and "last" in path.read_text(encoding="utf-8")
 
 
 def test_stdin_is_passed_through_to_the_command(proj):

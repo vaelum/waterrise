@@ -203,7 +203,7 @@ def test_what_is_refused_where_symlinks_cannot_be_made(server, repo, monkeypatch
     test_what_is_refused(server, repo)
 
 
-def test_registering_twice_keeps_one_entry_and_worktrees_get_their_own_slug(server, repo, tmp_path):
+def test_registering_twice_keeps_one_entry_and_another_repository_gets_its_own_slug(server, repo, tmp_path):
     status, again = client.call(server, "POST", "/api/repos",
                                 {"path": str(repo), "planning": str(repo / "planning"), "name": "demo"}, auth=True)
     assert again["slug"] == "demo"

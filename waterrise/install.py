@@ -36,6 +36,7 @@ from pathlib import Path
 from . import OLDEST_PIN, __version__, boot, dirs, ui, windows
 from .context import Project
 from .errors import WaterriseError
+from .proc import hidden
 
 PACKAGE = Path(__file__).resolve().parent
 CLONE_URL = "https://github.com/vaelum/waterrise.git"
@@ -170,7 +171,7 @@ def _venv_works(path: Path) -> bool:
         return False
     try:
         return subprocess.run([str(py), "-c", "import pip"], capture_output=True, timeout=30,
-                              stdin=subprocess.DEVNULL).returncode == 0
+                              stdin=subprocess.DEVNULL, **hidden()).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -199,7 +200,7 @@ def installed_version() -> str | None:
         return None
     try:
         out = subprocess.run([str(script), "--version"], capture_output=True, text=True, encoding="utf-8",
-                             timeout=30, stdin=subprocess.DEVNULL)
+                             timeout=30, stdin=subprocess.DEVNULL, **hidden())
     except (OSError, subprocess.TimeoutExpired):
         return None
     m = re.match(r"^waterrise (\S+)", out.stdout.strip())

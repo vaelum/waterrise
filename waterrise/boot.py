@@ -30,6 +30,7 @@ from pathlib import Path
 from . import dirs, ui, windows
 from .context import Project
 from .errors import WaterriseError
+from .proc import hidden
 
 UNIT = "waterrise.service"
 # Passed into the unit when set at install time: the user manager does not
@@ -64,7 +65,7 @@ def systemctl(*args: str, check: bool = True) -> subprocess.CompletedProcess:
     if shutil.which("systemctl") is None:
         raise WaterriseError("systemctl not found: --boot needs systemd's user manager")
     out = subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True, encoding="utf-8",
-                         stdin=subprocess.DEVNULL)
+                         stdin=subprocess.DEVNULL, **hidden())
     if check and out.returncode != 0:
         raise WaterriseError(f"systemctl --user {' '.join(args)} failed",
                              hint=(out.stderr or out.stdout).strip() or None)
@@ -158,7 +159,7 @@ def _linger_hint() -> None:
     if not user or shutil.which("loginctl") is None:
         return
     out = subprocess.run(["loginctl", "show-user", user, "--property=Linger"],
-                         capture_output=True, text=True, encoding="utf-8", stdin=subprocess.DEVNULL)
+                         capture_output=True, text=True, encoding="utf-8", stdin=subprocess.DEVNULL, **hidden())
     if out.stdout.strip() == "Linger=no":
         ui.warn("note:", "the service starts at login and stops at logout; to keep it running "
                          f"without a session: loginctl enable-linger {user}")

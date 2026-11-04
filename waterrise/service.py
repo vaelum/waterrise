@@ -45,6 +45,8 @@ API (JSON):
     PUT    /api/r/<slug>/approval/<id>/<local>    {verdict, note}           (gated steps)
     PUT    /api/r/<slug>/approval/<id>            {verdict, note}           (the plan)
     POST   /api/r/<slug>/comment/<id>             {on, text}
+    PUT    /api/r/<slug>/worktree/<id>            {name}: assign a plan to a worktree;
+                                          null for none
     PUT    /api/r/<slug>/order/<folder>           {ids}: the folder's items, in the
                                           order the user dragged them to
     PUT    /api/r/<slug>/move/<id>                {folder, ids?}: move the item to
@@ -86,14 +88,17 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from . import answers as answers_mod
-from . import central, dirs, lock
+from . import central, context, dirs, lock
 from . import check as check_mod
 from . import folder as folder_mod
 from .client import API, HEADER, SERVICE
-from .state import decision_local, plan_approval, satisfied, step_approval, summarize
+from .state import compare_plans, compare_steps, decision_local, plan_approval, satisfied, step_approval, summarize
 from . import protocol as protocol_mod
+from . import worktrees as worktrees_mod
+from .errors import WaterriseError
 from .types import (ID_RE, LOCAL_RE, PROTOCOLS_FOLDER, REPORTS_FOLDER, STATE_FOLDERS, jsonable, plan_hash,
                     plan_snapshot, step_hash, step_snapshot)
+from .proc import hidden
 
 STATIC = Path(__file__).resolve().parent / "static"
 ASSETS = ("app.css", "app.js", "events.js", "marked.min.js", "marked.LICENSE.md",
@@ -143,8 +148,13 @@ class Registry:
 
     def register(self, path: str, planning: str, name: str, home: str | None = None) -> dict:
         """Register a project, or update its planning folder. A project keeps
-        its home: moving it between homes is `projects home`, not this."""
+        its home: moving it between homes is `projects home`, not this. A
+        linked worktree registers its main checkout: one entry per repository."""
         repo = Path(path).resolve()
+        place = context.locate(repo)
+        if place and place.linked:
+            planning = str(place.in_main(Path(planning).resolve()))
+            repo = place.in_main(repo)
         with self.lock:
             for r in self.repos:
                 if Path(r["path"]) == repo:
@@ -176,6 +186,42 @@ class Registry:
             self.save()
             return entry
 
+    def collapse_worktrees(self) -> list[str]:
+        """One entry per repository, for a registry written when a linked
+        worktree could be its own project. An entry of a linked worktree goes
+        if its main checkout is registered; otherwise it becomes the main
+        checkout's. Nothing on disk changes. What was done, for the log."""
+        said: list[str] = []
+        with self.lock:
+            paths = {Path(r["path"]) for r in self.repos}
+            kept: list[dict] = []
+            for r in self.repos:
+                old = Path(r["path"])
+                place = context.locate(old) if old.is_dir() else None
+                if not place or not place.linked:
+                    kept.append(r)
+                    continue
+                main = place.in_main(old)
+                if main in paths:
+                    if (r.get("home") or "repo") == "central":
+                        # Its plans are only here; dropping it would hide them.
+                        said.append(f"kept {r.get('slug')}: {old} is a worktree of {main}, "
+                                    f"but plans in its own central home")
+                        kept.append(r)
+                    else:
+                        said.append(f"dropped {r.get('slug')}: {old} is a worktree of {main}")
+                    continue
+                r["path"] = str(main)
+                if (r.get("home") or "repo") == "repo" and r.get("planning"):
+                    r["planning"] = str(place.in_main(Path(r["planning"])))
+                paths.add(main)
+                said.append(f"{r.get('slug')} is now {main}: {old} is a worktree of it")
+                kept.append(r)
+            if said:
+                self.repos = kept
+                self.save()
+        return said
+
     def set_home(self, slug: str, home: str, planning: str) -> dict | None:
         with self.lock:
             entry = self.by_slug(slug)
@@ -204,7 +250,7 @@ def _git_common(repo: Path) -> str:
     try:
         out = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute",
                               "--git-common-dir"], capture_output=True, text=True, timeout=5, encoding="utf-8",
-                              stdin=subprocess.DEVNULL)
+                              stdin=subprocess.DEVNULL, **hidden())
         if out.returncode == 0:
             return out.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
@@ -215,7 +261,8 @@ def _git_common(repo: Path) -> str:
 def _branch(repo: Path) -> str:
     try:
         out = subprocess.run(["git", "-C", str(repo), "branch", "--show-current"],
-                             capture_output=True, text=True, timeout=5, encoding="utf-8", stdin=subprocess.DEVNULL)
+                             capture_output=True, text=True, timeout=5, encoding="utf-8",
+                             stdin=subprocess.DEVNULL, **hidden())
         return out.stdout.strip() if out.returncode == 0 else ""
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -229,14 +276,38 @@ def _folder(entry: dict) -> folder_mod.Folder:
     return folder_mod.read(Path(entry["planning"]), central.git_root(entry))
 
 
+def _watched(entry: dict) -> list[Path]:
+    """The planning folders behind a project's pages: its own, and each worktree's
+    under `worktrees/`, where a plan can live."""
+    planning = Path(entry["planning"])
+    if not planning.is_dir():
+        return [planning]
+    return [planning, *(h.planning for h in folder_mod.worktree_homes(planning.resolve(), central.git_root(entry).resolve()))]
+
+
+def _signature(entry: dict) -> str:
+    return "".join(_tree_signature(p) for p in _watched(entry))
+
+
+def _home_view(home: folder_mod.Home | None, known: list) -> dict | None:
+    """Where a plan lives, when that is a worktree: its name, branch and path."""
+    if home is None:
+        return None
+    branch = next((w.branch for w in known if w.path == home.checkout), None)
+    return {"name": home.name, "branch": branch, "path": str(home.checkout)}
+
+
 def repo_view(entry: dict, *, deep: bool = True) -> dict:
     missing = not Path(entry["planning"]).is_dir()
     out = {"slug": entry["slug"], "name": entry.get("name"), "path": entry["path"],
            "common": entry.get("common"), "missing": missing, "home": entry.get("home") or "repo",
            "planning": entry["planning"]}
+    root = Path(entry["path"])
+    out["worktree_count"] = worktrees_mod.count(root)
     if missing:
         return out
     f = _folder(entry)
+    known = worktrees_mod.read(root) if deep else None
     out["typed"] = f.typed
     out["user"] = f.user
     out["branch"] = _branch(Path(entry["path"]))
@@ -254,6 +325,9 @@ def repo_view(entry: dict, *, deep: bool = True) -> dict:
         ans = f.answers(it.id)
         s = summarize(it, ans, plan_approval_required=f.plan_approval, ids=ids).as_json()
         s["rank"] = folder_mod.rank(ans, it.folder)
+        if known is not None:
+            s["worktree"] = worktrees_mod.where(root, f.assignment(it.id), known)
+            s["home"] = _home_view(it.home, known)
         # What has to be done before this plan can start, and what waits on it.
         s["needs"] = []
         for ref in _needs(it):
@@ -277,6 +351,13 @@ def repo_view(entry: dict, *, deep: bool = True) -> dict:
     out["waiting"] = waiting
     out["legacy"] = f.legacy
     out["forms"] = f.forms
+    if known is not None:
+        out["worktrees"] = [
+            {"name": w.name, "path": str(w.path), "branch": w.branch, "main": w.main,
+             **worktrees_mod.state(root, w),
+             "plans": [i["id"] for i in items if w.name in ((i.get("worktree") or {}).get("name"),
+                                                             (i.get("home") or {}).get("name"))]}
+            for w in known if w.assignable]
     if deep:
         rep = check_mod.run(f, git=False)
         out["errors"] = rep.errors
@@ -345,6 +426,15 @@ def plan_reports(f: folder_mod.Folder, plan: folder_mod.Item) -> list[dict]:
     return out
 
 
+def _approval_view(a, compare) -> dict:
+    """An approval as the page reads it: what changed instead of both snapshots,
+    which would send a whole plan twice on every load."""
+    view = {k: getattr(a, k) for k in ("status", "verdict", "at", "note", "sha256", "current")}
+    if a.status == "stale":
+        view["changes"] = compare(a.snapshot, a.now)
+    return view
+
+
 def item_view(entry: dict, item_id: str) -> dict | None:
     f = _folder(entry)
     it = f.get(item_id)
@@ -355,9 +445,7 @@ def item_view(entry: dict, item_id: str) -> dict | None:
     for s in it.steps():
         if s.get("gate"):
             a = step_approval(s, ans)
-            approvals[s.get("id")] = {k: getattr(a, k) for k in
-                                      ("status", "verdict", "at", "note", "sha256", "current", "snapshot",
-                                       "now")}
+            approvals[s.get("id")] = _approval_view(a, compare_steps)
     view = {
         "repo": {"slug": entry["slug"], "name": entry.get("name")},
         "id": it.id, "kind": it.kind, "folder": it.folder, "file": it.rel,
@@ -369,6 +457,11 @@ def item_view(entry: dict, item_id: str) -> dict | None:
                      if x.file in (it.rel, f"answers/{it.id}.json") and x.level != "info"],
     }
     if it.kind == "plan":
+        root = Path(entry["path"])
+        known = worktrees_mod.read(root)
+        view["worktree"] = worktrees_mod.where(root, f.assignment(item_id), known)
+        view["home"] = _home_view(it.home, known)
+        view["worktrees"] = [w.name for w in known if w.assignable]
         view["reports"] = plan_reports(f, it)
         view["protocols"] = protocol_mod.summaries(f.root, it.id)
     if it.kind == "report":
@@ -380,9 +473,7 @@ def item_view(entry: dict, item_id: str) -> dict | None:
         view["about"] = {"id": target.id, "title": target.title} if target else None
     if it.kind == "plan":
         pa = plan_approval(it, ans)
-        view["plan_approval"] = jsonable({k: getattr(pa, k) for k in
-                                          ("status", "verdict", "at", "note", "sha256", "current",
-                                           "snapshot", "now")})
+        view["plan_approval"] = jsonable(_approval_view(pa, compare_plans))
     return view
 
 
@@ -558,7 +649,8 @@ class Handler(BaseHTTPRequestHandler):
                 it = fold.get(api[3])
                 if it is None:
                     return self._error(404, "no such item")
-                paths = [it.path, fold.answers_path(it.id), f]
+                paths = [it.path, fold.answers_path(it.id), fold.assignments_path, f, Path(entry["path"]) / worktrees_mod.FOLDER,
+                         *(h.planning / it.folder for h in folder_mod.worktree_homes(fold.root, fold.repo))]
                 if it.kind == "plan":
                     # Its page lists its reports and its steps' protocols: a
                     # new, changed or removed one must not be answered with a 304.
@@ -604,8 +696,8 @@ class Handler(BaseHTTPRequestHandler):
             """A signature per repository behind the stream, and "" for the registry."""
             if scope == "repo":
                 entry = self.registry.by_slug(slug)
-                return {slug: _tree_signature(Path(entry["planning"]))} if entry else {}
-            sigs = {r["slug"]: _tree_signature(Path(r["planning"])) for r in self.registry.repos}
+                return {slug: _signature(entry)} if entry else {}
+            sigs = {r["slug"]: _signature(r) for r in self.registry.repos}
             sigs[""] = _etag(self.registry.path)
             return sigs
 
@@ -834,7 +926,7 @@ class Handler(BaseHTTPRequestHandler):
                 def change(d: dict, n=n) -> None:
                     d["order"] = {"folder": to, "rank": n, "at": answers_mod.now()}
                 answers_mod.update(f.answers_path(iid), iid, change)
-        return self._json(200, {"moved": True, "folder": to, "file": target.relative_to(f.root).as_posix()})
+        return self._json(200, {"moved": True, "folder": to, "file": target.relative_to(it.home.planning if it.home else f.root).as_posix()})
 
     def _item_write(self, entry: dict, method: str, what: str, item_id: str, local: str | None,
                     body: dict) -> None:
@@ -843,6 +935,17 @@ class Handler(BaseHTTPRequestHandler):
         if it is None:
             return self._error(404, "no such item")
         path = f.answers_path(it.id)
+
+        if what == "worktree" and method == "PUT" and local is None:
+            name = body.get("name")
+            if name is not None and not isinstance(name, str):
+                return self._error(400, "name must be a worktree's name, or null")
+            try:
+                warning = worktrees_mod.assign(Path(entry["path"]), f, it, name, by="page")
+            except WaterriseError as e:
+                return self._error(409, e.message)
+            return self._json(200, {"worktree": worktrees_mod.where(Path(entry["path"]), f.assignment(it.id)),
+                                    "warning": warning})
 
         if what == "decision" and method == "PUT" and local:
             dec = next((d for d in it.decisions() if decision_local(it, d) == local), None)
@@ -888,12 +991,17 @@ class Handler(BaseHTTPRequestHandler):
             note = body.get("note") or ""
             if verdict not in ("approved", "disapproved", None) or not isinstance(note, str):
                 return self._error(400, "verdict must be approved, disapproved or null")
+            shown = body.get("sha256")      # the text the user was looking at
+            if shown is not None and not isinstance(shown, str):
+                return self._error(400, "sha256 must be a string")
             if local:
                 step = next((s for s in it.steps() if s.get("id") == local), None)
                 if step is None:
                     return self._error(404, "no such step")
                 if not step.get("gate"):
                     return self._error(400, "this step has no gate")
+                if verdict is not None and shown is not None and shown != step_hash(step):
+                    return self._error(409, "this step has changed since it was drawn; look at it again")
                 record = {"verdict": verdict, "note": note, "at": answers_mod.now(),
                           "sha256": step_hash(step), "snapshot": jsonable(step_snapshot(step))}
 
@@ -905,6 +1013,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 if it.kind != "plan":
                     return self._error(400, "only a plan is approved as a whole")
+                if verdict is not None and shown is not None and shown != plan_hash(it.data):
+                    return self._error(409, "this plan has changed since it was drawn; look at it again")
                 record = {"verdict": verdict, "note": note, "at": answers_mod.now(),
                           "sha256": plan_hash(it.data), "snapshot": jsonable(plan_snapshot(it.data))}
 
@@ -954,6 +1064,8 @@ def _registry(state: Path) -> Registry:
             reg.save()
             sys.stderr.write(f"{answers_mod.now()} imported {len(reg.repos)} project(s) "
                              f"from {old.path}\n")
+    for line in reg.collapse_worktrees():
+        sys.stderr.write(f"{answers_mod.now()} registry: {line}\n")
     return reg
 
 

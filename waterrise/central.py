@@ -20,6 +20,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import dirs, lock
+from .proc import hidden
 
 HOMES = ("repo", "central")
 
@@ -43,7 +44,7 @@ def git_root(entry: dict) -> Path:
 
 def _git(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", str(root()), *args], capture_output=True, text=True, encoding="utf-8",
-                          timeout=30, stdin=subprocess.DEVNULL)
+                          timeout=30, stdin=subprocess.DEVNULL, **hidden())
 
 
 def ensure() -> Path:
@@ -52,7 +53,7 @@ def ensure() -> Path:
     if not (top / ".git").exists():
         top.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "init", "-q", str(top)], check=True, capture_output=True, timeout=30,
-                       stdin=subprocess.DEVNULL)
+                       stdin=subprocess.DEVNULL, **hidden())
         (top / "README.md").write_text(
             "# waterrise: the central plans\n\n"
             "One folder per project that plans outside its own repository:\n"
@@ -77,7 +78,8 @@ def commit(slug: str, message: str) -> bool:
     if _git("diff", "--cached", "--quiet", "--", where).returncode == 0:
         return False
     out = subprocess.run(["git", *_identity(), "-C", str(root()), "commit", "-q", "-m", message, "--", where],
-                         capture_output=True, text=True, timeout=30, encoding="utf-8", stdin=subprocess.DEVNULL)
+                         capture_output=True, text=True, timeout=30, encoding="utf-8",
+                         stdin=subprocess.DEVNULL, **hidden())
     return out.returncode == 0
 
 
@@ -109,18 +111,19 @@ def _all_answer_locks(planning: Path):
 
 def _tracked(repo: Path, path: Path) -> bool:
     out = subprocess.run(["git", "-C", str(repo), "ls-files", "--", str(path)],
-                         capture_output=True, text=True, timeout=30, encoding="utf-8", stdin=subprocess.DEVNULL)
+                         capture_output=True, text=True, timeout=30, encoding="utf-8",
+                         stdin=subprocess.DEVNULL, **hidden())
     return out.returncode == 0 and bool(out.stdout.strip())
 
 
 def _repo_commit(repo: Path, path: Path, message: str) -> None:
     """Commit `path` in the project's own repository, and nothing else in it."""
     subprocess.run(["git", "-C", str(repo), "add", "-A", "--", str(path)], capture_output=True, timeout=30,
-                   stdin=subprocess.DEVNULL)
+                   stdin=subprocess.DEVNULL, **hidden())
     if subprocess.run(["git", "-C", str(repo), "diff", "--cached", "--quiet", "--", str(path)],
-                      timeout=30, stdin=subprocess.DEVNULL).returncode != 0:
+                      timeout=30, stdin=subprocess.DEVNULL, **hidden()).returncode != 0:
         subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", message, "--", str(path)],
-                       check=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL)
+                       check=True, capture_output=True, timeout=30, stdin=subprocess.DEVNULL, **hidden())
 
 
 def move_home(entry: dict, to: str, repo_planning: Path, set_home) -> Path:

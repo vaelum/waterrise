@@ -22,6 +22,13 @@ too. Agents read it through `status` and `gate`, never by hand.
 
 `order` is where the user dragged the item in its folder's lane. It counts
 only while the item is still in that folder.
+
+Which worktree a plan belongs to is not here. A branch changes a plan's answers
+file, so an assignment beside them would make the merge conflict. It has one
+file of its own, `planning/assignments.json` in the main checkout, which
+branches do not change, written the same way by `assign` and the page:
+
+    {"format": 1, "plans": {"p-3p758x": {"name": "foo", "at": "…", "by": "page"}}}
 """
 
 from __future__ import annotations
@@ -71,14 +78,14 @@ def read(path: Path, item: str = "") -> dict:
 
 
 @contextmanager
-def _locked(path: Path):
+def _locked(path: Path, lock_file: Path | None = None):
     key = str(path.resolve())
     with _locks_guard:
         lock = _locks.setdefault(key, threading.Lock())
     with lock:
         # And across processes: a `planning resolve` in a terminal while the
         # service writes the same file.
-        with lock_mod.held(path.parent / f".{path.name}.lock"):
+        with lock_mod.held(lock_file or path.parent / f".{path.name}.lock"):
             yield
 
 
@@ -109,6 +116,33 @@ def update(path: Path, item: str, change: Callable[[dict], None]) -> dict:
         change(data)
         write(path, data)
         return data
+
+
+def read_assignments(path: Path) -> tuple[dict[str, dict], str | None]:
+    """Plan id -> its assignment, from the project's assignments file, and what
+    is wrong with the file, if anything. Missing is not wrong."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError) as e:
+        return {}, str(e)
+    plans = data.get("plans") if isinstance(data, dict) else None
+    if not isinstance(plans, dict):
+        return {}, "no `plans` object in it"
+    return {k: v for k, v in plans.items() if isinstance(v, dict)}, None
+
+
+def update_assignments(path: Path, change: Callable[[dict[str, dict]], None]) -> dict[str, dict]:
+    """Read, apply `change`, write, under a lock. The lock is in `answers/`,
+    where a planning folder's .gitignore already covers it."""
+    lock_file = path.parent / "answers" / f".{path.name}.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with _locked(path, lock_file):
+        plans, _ = read_assignments(path)
+        change(plans)
+        write(path, {"format": FORMAT, "plans": plans})
+        return plans
 
 
 def next_comment_id(data: dict) -> str:

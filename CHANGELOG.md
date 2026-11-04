@@ -7,6 +7,56 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.11.1]
+
+### Added
+
+- **A plan tracked in the repository can live in a worktree,** on its branch, with
+  its answers. A plan assigned to a worktree with a copy lives there, and an item
+  made there, or only there, too. One rule says which copy counts, so commands, the
+  page and `gate` read the same one from anywhere and an approval counts everywhere.
+  Merging brings it back. Protocols stay in the main checkout. A central project's
+  plans stay central.
+- **Plans can be assigned to worktrees.** `waterrise assign ID NAME` or a picker
+  on the plan's page. `status`, `show`, `list --worktree`, the page and the MCP
+  tools say where a plan belongs, with the path. `run` and `note` refuse in another
+  worktree and warn in the main checkout; `gate`'s exit status does not depend on
+  location. `check` reports a plan whose worktree is gone, and it is never
+  silently unassigned. The assignment is kept in `planning/assignments.json`.
+- **`waterrise worktree add`, `list` and `remove`.** Worktrees go in a `worktrees/`
+  folder at the top of the main checkout, which git ignores: the top `.gitignore`,
+  or `.git/info/exclude` for a central project. `remove` also refuses a worktree
+  whose unmerged branch has the only current copy of a plan.
+- The repository's page lists worktrees and their state, and cards can be filtered
+  by worktree.
+
+### Changed
+
+- **All worktrees of a repository are one project,** however a command is started.
+  If you relied on a worktree's own `planning/`, a plan there that also exists in the
+  main checkout, and is not assigned to that worktree, is no longer read from there;
+  `check` run in that worktree names it. A worktree outside `worktrees/` holds no
+  plans of its own any more: merging or moving them brings them back.
+- The registry has one entry per repository. When the service starts, an entry for
+  a linked worktree is dropped if its main checkout is registered, and otherwise
+  becomes the main checkout's. An entry whose plans are in its own central home is
+  kept. Nothing on disk changes.
+- `waterrise init` now adds `/worktrees/` to the top `.gitignore`.
+
+- **A change since an answer is reviewed in a popup.** The plan's page keeps one line
+  and a **Review changes** button; the popup shows each change once, by phase, step,
+  field and word, inline or side by side, with what did not change folded. No JSON.
+  While an approval is stale, Approve and Disapprove are only in the popup.
+- **An approval on outdated text is refused.** `PUT .../approval/...` takes an optional
+  `sha256` of the text the user was shown, and answers 409 if it is no longer the
+  current one. The pages always send it. What an approval covers, and what
+  `waterrise gate` accepts, have not changed.
+
+### Fixed
+
+- A card can be dragged from a full lane to a short one: all lanes are as tall as
+  the fullest, and all of a lane takes a drop.
+
 ## [2026.10.7]
 
 ### Changed

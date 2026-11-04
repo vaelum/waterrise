@@ -37,6 +37,7 @@ and is the same thing; below, `waterrise` stands for either.
    planning service's API with `curl` or a script. Only the user's clicks write
    answers and approvals. The only exceptions are the commands
    `waterrise resolve` (a comment handled) and `waterrise convert`.
+   `waterrise assign` writes `planning/assignments.json`; never edit it by hand.
 6. **A step with `gate = true` runs only after
    `waterrise gate <id> <step>` exits 0,** run just before the action, with
    its output line quoted. If it fails, stop, say why, and give the user the URL.
@@ -50,7 +51,15 @@ and is the same thing; below, `waterrise` stands for either.
    your course, and every command that matters through
    `waterrise run <id> <step> -- COMMAND ...`, never a hand-built redirect.
    the user reads it at the step, live; the `[[log]]` stays the summary.
-9. If `waterrise` is not installed, say so and give the install command
+9. **All worktrees of a repository are one project, and a plan can live in one.**
+   A plan assigned to a worktree with a copy lives there, as does an item only there;
+   the rest live in the main checkout. Edit a plan and commit it, answers included,
+   in its home (`git -C <its checkout> commit -- <files>`); `show` says where, and
+   protocols always stay in the main checkout. If `status` names a worktree for the
+   plan, do the work in it; `run` and `note` refuse in any other worktree. New
+   worktrees go in `worktrees/`, with `waterrise worktree add NAME`. A central
+   project's plans stay central.
+10. If `waterrise` is not installed, say so and give the install command
    (`git clone https://github.com/vaelum/waterrise.git && cd waterrise &&
    python3 -m waterrise install`); install it only when asked. A butler
    project pinned to a 0.x version runs its own older planning code under
@@ -70,6 +79,8 @@ and is the same thing; below, `waterrise` stands for either.
 | `move ID FOLDER` | move it, after checking the target folder's rules |
 | `gate ID [STEP]` | exit 0 only on the user's current approval |
 | `resolve ID COMMENT --note TEXT` | mark the user's comment handled |
+| `assign ID NAME\|--none` | a plan's worktree, or none |
+| `worktree add\|list\|remove` | the project's worktrees, in `worktrees/` |
 | `note ID STEP TEXT` | a dated note in the step's protocol |
 | `run ID STEP -- COMMAND ...` | a command, its output into the step's protocol |
 | `convert FILE` | a typed skeleton from a Markdown plan or an old HTML form |

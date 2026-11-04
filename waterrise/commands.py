@@ -18,7 +18,7 @@ from pathlib import Path
 from . import ui
 from .command import Node, arg
 from .context import Project as Ctx
-from .context import prog, short
+from .context import locate, prog, short
 from .errors import WaterriseError
 from . import answers as answers_mod
 from . import central
@@ -27,10 +27,12 @@ from . import client
 from . import convert as convert_mod
 from . import folder as folder_mod
 from . import install as install_mod
+from . import worktrees as worktrees_mod
 from .state import (DONE_STEP, decision_local, decision_state, plan_approval, step_approval,
                     summarize)
 from .types import (CONFIG_FILE, FORMAT, ID_RE, KINDS, NOTES_FOLDER, REPORTS_FOLDER, SCHEMA_FOLDER, STATE_FOLDERS,
                     json_schema, jsonable, new_id)
+from .proc import hidden
 
 HERE = Path(__file__).resolve().parent
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
@@ -93,7 +95,7 @@ def _print_json(obj) -> None:
 def _git_user(root: Path) -> str:
     try:
         out = subprocess.run(["git", "-C", str(root), "config", "user.name"], capture_output=True,
-                             text=True, timeout=5, encoding="utf-8", stdin=subprocess.DEVNULL)
+                             text=True, timeout=5, encoding="utf-8", stdin=subprocess.DEVNULL, **hidden())
         return out.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -136,9 +138,17 @@ def cmd_init(ctx: Ctx, args) -> int:
         # The answers files are committed; the locks beside them are not.
         ignore.write_text("answers/.*.lock\nprotocols/\n", encoding="utf-8", newline="\n")
     _write_schema(root)
+    _ignore_worktrees(ctx)
     ui.ok("typed planning folder", f"{ctx.disp(root)}: {', '.join(todo)}")
     ui.note(f"next: {prog()} new plan <name>")
     return 0
+
+
+def _ignore_worktrees(ctx: Ctx) -> None:
+    path = worktrees_mod.ensure_ignored(ctx)
+    if path is not None:
+        ui.note(f"{worktrees_mod.IGNORE_RULE} is now ignored, in {ctx.disp(path)}"
+                + ("" if ctx.home == "central" else "; the change is not committed"))
 
 
 def _write_schema(root: Path) -> Path:
@@ -173,7 +183,9 @@ def cmd_new(ctx: Ctx, args) -> int:
     allowed = check_mod.ALLOWED[args.kind]
     if folder not in allowed:
         raise WaterriseError(f"a {args.kind} lives in {', '.join(allowed)}, not {folder}/")
-    path = f.root / folder / f"{args.name}.toml"
+    # A new item lives where it is made, in a worktree that can hold it.
+    made_in = next((h.planning for h in folder_mod.worktree_homes(f.root, f.repo) if h.checkout == ctx.checkout), f.root)
+    path = made_in / folder / f"{args.name}.toml"
     if path.exists():
         raise WaterriseError(f"{ctx.disp(path)} exists")
     taken = {i.id for i in f.items} | set(f.answer_files)
@@ -182,7 +194,7 @@ def cmd_new(ctx: Ctx, args) -> int:
     text = (HERE / "templates" / f"{args.kind}.toml").read_text(encoding="utf-8")
     text = (text.replace("{id}", item_id).replace("{title}", title.replace('"', '\\"'))
             .replace("{today}", _dt.date.today().isoformat())
-            .replace("{schema}", _schema_ref(path, f.root)))
+            .replace("{schema}", _schema_ref(path, made_in)))
     doc = path.with_suffix(".html")
     if args.kind == "report" and doc.exists():
         raise WaterriseError(f"{ctx.disp(doc)} exists")
@@ -207,6 +219,8 @@ def cmd_new(ctx: Ctx, args) -> int:
 def cmd_check(ctx: Ctx, args) -> int:
     f = _folder(ctx)
     report = check_mod.run(f, git=not args.no_git)
+    if not args.no_git:
+        check_mod.worktree_warnings(report, ctx.root, ctx.planning, ctx.checkout)
     if args.json:
         _print_json(report.as_json())
     else:
@@ -240,10 +254,30 @@ def cmd_check(ctx: Ctx, args) -> int:
 # status, show, list
 # --------------------------------------------------------------------------- #
 
-def _status_lines(f: folder_mod.Folder, it: folder_mod.Item) -> list[str]:
+def _worktree_line(root: Path, assigned: str | None) -> str | None:
+    at = worktrees_mod.where(root, assigned)
+    if at is None:
+        return None
+    return f"worktree: {at['name']}  {at['path']}" + ("  (gone)" if at["gone"] else "")
+
+
+def _home_line(f: folder_mod.Folder, it: folder_mod.Item) -> str | None:
+    """Where an item is read from, when its assignment does not already say so."""
+    assigned = f.assignment(it.id)
+    if it.home and it.home.name != assigned:
+        return f"lives in the worktree {it.home.name}, {it.home.checkout}, on its branch only"
+    if not it.home and assigned and assigned != worktrees_mod.MAIN and assigned in f.copies:
+        return f"read from the main checkout: {assigned} has no copy of it"
+    return None
+
+
+def _status_lines(f: folder_mod.Folder, it: folder_mod.Item, root: Path) -> list[str]:
     ans = f.answers(it.id)
     s = summarize(it, ans, plan_approval_required=f.plan_approval, ids=f.by_id())
     lines = [f"{it.id}  {it.folder}/  {it.title}"]
+    for line in (_worktree_line(root, f.assignment(it.id)), _home_line(f, it)):
+        if line:
+            lines.append(f"  {line}")
     for what, local, text in s.for_user:
         lines.append(f"  for {f.user}:  {what} {local}  {text}".rstrip())
     for what, local, text in s.for_agent:
@@ -268,15 +302,24 @@ def cmd_status(ctx: Ctx, args) -> int:
     items = [_item(f, args.id)] if args.id else [i for i in f.items if i.parsed and i.id]
     if args.json:
         _print_json([summarize(i, f.answers(i.id), plan_approval_required=f.plan_approval, ids=f.by_id()).as_json()
-                     | {"answers": f.answers(i.id)} for i in items])
+                     | {"answers": f.answers(i.id), "worktree": worktrees_mod.where(ctx.root, f.assignment(i.id)),
+                        "home": str((i.home.checkout if i.home else ctx.root))}
+                     for i in items])
         return 0
+    if ctx.checkout is not None and ctx.checkout != ctx.root:
+        w = worktrees_mod.here(ctx)
+        branch = next((x.branch for x in worktrees_mod.read(ctx.root) if x.main), None)
+        ui.plain(f"in the worktree {w.name if w else ctx.checkout.name}, {ctx.checkout}; "
+                 f"the main checkout is {ctx.root}" + (f", on {branch}" if branch else ""))
+        if w:
+            items.sort(key=lambda i: f.worktree_of(i) != w.name)
     if not args.id:
         items = [i for i in items if i.folder != "done" or
                  summarize(i, f.answers(i.id), plan_approval_required=f.plan_approval, ids=f.by_id()).for_agent]
     if not items:
         ui.ok("nothing open", ctx.disp(f.root))
     for it in items:
-        for i, line in enumerate(_status_lines(f, it)):
+        for i, line in enumerate(_status_lines(f, it, ctx.root)):
             ui.plain(ui.bold(line) if i == 0 else line)
     broken = [i.rel for i in f.items if not i.parsed or not i.id]
     if broken:
@@ -288,11 +331,20 @@ def cmd_show(ctx: Ctx, args) -> int:
     f = _typed(ctx)
     it = _item(f, args.id)
     if args.json:
-        _print_json({"file": it.rel, "folder": it.folder, "data": it.data, "answers": f.answers(it.id)})
+        _print_json({"file": it.rel, "folder": it.folder, "data": it.data, "answers": f.answers(it.id),
+                     "worktree": worktrees_mod.where(ctx.root, f.assignment(it.id)),
+                     "home": str(it.home.checkout if it.home else ctx.root)})
         return 0
     ans = f.answers(it.id)
     d = it.data
     out = [ui.bold(f"{d.get('title')}"), f"{it.kind} {it.id} · {it.folder}/ · {it.rel}"]
+    for line in (_worktree_line(ctx.root, f.assignment(it.id)), _home_line(f, it)):
+        if line:
+            out.append(line)
+    copies = [name for name, c in f.copies.items() if c.get(it.id) and not (it.home and it.home.name == name)]
+    if copies:
+        out.append(f"read from {it.home.name if it.home else 'the main checkout'}, {it.path}; "
+                   f"not from the copies in {', '.join(copies)}")
     if d.get("summary"):
         out += ["", d["summary"]]
     for key in ("why", "subject", "method"):
@@ -362,12 +414,15 @@ def cmd_list(ctx: Ctx, args) -> int:
             if not it.parsed or not it.id:
                 continue
             ans = f.answers(it.id)
+            if args.worktree and f.worktree_of(it) != args.worktree:
+                continue
             base = {"repo": repo, "item": it.id, "folder": it.folder}
             if args.what == "items":
                 s = summarize(it, ans, plan_approval_required=f.plan_approval, ids=f.by_id())
                 if not args.all and it.folder == "done":
                     continue
-                rows.append(base | {"kind": it.kind, "title": it.title, "done": s.steps_done,
+                rows.append(base | {"worktree": f.worktree_of(it), "kind": it.kind, "title": it.title,
+                                    "done": s.steps_done,
                                     "total": s.steps_total, "for_user": len(s.for_user),
                                     "for_agent": len(s.for_agent)})
             elif args.what == "decisions":
@@ -431,6 +486,7 @@ def cmd_list(ctx: Ctx, args) -> int:
                 waits.append(f"{r['for_agent']} for the agent")
             prog = f"{r['done']}/{r['total']}" if r["total"] else "-"
             ui.plain(f"{ref:24} {r['folder']:12} {r['kind']:9} {prog:>6}  {r['title']}"
+                     + (f"  [{r['worktree']}]" if r["worktree"] else "")
                      + (ui.dim("  (" + ", ".join(waits) + ")") if waits else ""))
         elif args.what == "decisions":
             ui.plain(ui.bold(f"{ref}  [{r['state']}]  {r['question']}"))
@@ -501,6 +557,9 @@ def cmd_gate(ctx: Ctx, args) -> int:
         a = plan_approval(it, ans)
         what = f"{it.id} (the plan)"
     line = f"{what}: {a.line(f.user)}"
+    at = worktrees_mod.where(ctx.root, f.assignment(it.id))
+    if at and ctx.checkout is not None:
+        ui.note(f"run in {ctx.checkout}; {it.id} is assigned to {at['name']}, {at['path']}")
     if a.ok:
         ui.ok("gate open", line)
         return 0
@@ -542,10 +601,18 @@ def _agent_step(f: folder_mod.Folder, item_id: str, step: str) -> folder_mod.Ite
     return it
 
 
+def _in_place(ctx: Ctx, f: folder_mod.Folder, it: folder_mod.Item) -> None:
+    """Stop or warn when an assigned plan is worked on from the wrong place."""
+    warning = worktrees_mod.placed(ctx, it, f.assignment(it.id))
+    if warning:
+        ui.warn("elsewhere", warning)
+
+
 def cmd_note(ctx: Ctx, args) -> int:
     from . import protocol
     f = _typed(ctx)
     it = _agent_step(f, args.id, args.step)
+    _in_place(ctx, f, it)
     text = " ".join(args.text) if args.text and args.text != ["-"] else sys.stdin.read()
     if not text.strip():
         raise WaterriseError("nothing to note", hint=f"{prog()} note {it.id} {args.step} TEXT, or the text on stdin")
@@ -559,6 +626,7 @@ def cmd_run(ctx: Ctx, args) -> int:
     from . import protocol
     f = _typed(ctx)
     it = _agent_step(f, args.id, args.step)
+    _in_place(ctx, f, it)
     argv = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not argv:
         raise WaterriseError("no command to run", hint=f"{prog()} run {it.id} {args.step} -- COMMAND ...")
@@ -719,8 +787,14 @@ def cmd_service(ctx: Ctx, args) -> int:
     raise WaterriseError(f"unknown action {action}")
 
 
+def _project_path(path: Path) -> Path:
+    """A path a user named as a project: a linked worktree means its main checkout."""
+    place = locate(path) if path.is_dir() else None
+    return place.in_main(path) if place else path
+
+
 def cmd_forget(ctx: Ctx, args) -> int:
-    repo = Path(args.path).resolve() if args.path else ctx.root
+    repo = _project_path(Path(args.path).resolve()) if args.path else ctx.root
     running = client.find()
     if not running:
         raise WaterriseError("the planning service is not running")
@@ -730,6 +804,77 @@ def cmd_forget(ctx: Ctx, args) -> int:
         ui.ok("forgotten", str(repo))
         return 0
     raise WaterriseError(f"{repo} is not registered", hint=f"{prog()} service")
+
+
+# --------------------------------------------------------------------------- #
+# worktrees
+# --------------------------------------------------------------------------- #
+
+def cmd_assign(ctx: Ctx, args) -> int:
+    if bool(args.name) == bool(args.none):
+        raise WaterriseError("say where: a worktree's name, or --none",
+                             hint=f"{prog()} worktree list")
+    f = _typed(ctx)
+    it = _item(f, args.id)
+    if ctx.would(f"assign {it.id} to {args.name or 'no worktree'}"):
+        return 0
+    warning = worktrees_mod.assign(ctx.root, f, it, args.name, by="command")
+    ui.ok(it.id, f"assigned to {args.name}" if args.name else "can be worked on anywhere")
+    if warning:
+        ui.warn("another copy", warning)
+    return 0
+
+
+def cmd_worktree_add(ctx: Ctx, args) -> int:
+    if ctx.would(f"add the worktree {worktrees_mod.FOLDER}/{args.name}"):
+        return 0
+    f = plan = None
+    if args.plan:
+        f = _typed(ctx)
+        plan = _item(f, args.plan)
+        if plan.kind != "plan":
+            raise WaterriseError(f"{plan.id} is a {plan.kind}; only a plan can be assigned to a worktree")
+    w, new = worktrees_mod.add(ctx, args.name, args.branch, args.from_)
+    if plan is not None:
+        f = _typed(ctx)         # again: the new worktree has a copy now
+        warning = worktrees_mod.assign(ctx.root, f, _item(f, plan.id), w.name, by="command")
+        ui.ok(plan.id, f"assigned to {w.name}")
+        if warning:
+            ui.warn("another copy", warning)
+    _ignore_worktrees(ctx)
+    ui.ok(w.name, f"{w.path} on {'a new branch ' if new else ''}{w.branch}")
+    return 0
+
+
+def cmd_worktree_list(ctx: Ctx, args) -> int:
+    f = folder_mod.read(planning_dir(ctx), ctx.git_root or ctx.root)
+    rows = []
+    for w in worktrees_mod.read(ctx.root):
+        if not (w.assignable or args.all):
+            continue
+        plans = worktrees_mod.plans_of(f, w.name) if f.exists and w.assignable else []
+        rows.append({"name": w.name, "path": str(w.path), "branch": w.branch, "assignable": w.assignable,
+                     "here": w.path == ctx.checkout, **worktrees_mod.state(ctx.root, w),
+                     "plans": [p.id for p in plans]})
+    if args.json:
+        _print_json(rows)
+        return 0
+    for r in rows:
+        state = "clean" if r["clean"] else "dirty"
+        apart = "".join((f" +{r['ahead']}" if r["ahead"] else "", f" -{r['behind']}" if r["behind"] else ""))
+        ui.plain(f"{'*' if r['here'] else ' '} {r['name']:20} {r['branch'] or '(detached)':24} {state}{apart}  {r['path']}"
+                 + (f"  {', '.join(r['plans'])}" if r["plans"] else "")
+                 + ("" if r["assignable"] else ui.dim("  (not assignable)")))
+    return 0
+
+
+def cmd_worktree_remove(ctx: Ctx, args) -> int:
+    if ctx.would(f"remove the worktree {args.name}"):
+        return 0
+    f = folder_mod.read(planning_dir(ctx), ctx.git_root or ctx.root)
+    w = worktrees_mod.remove(ctx, args.name, f)
+    ui.ok("removed", f"{w.path}; the branch {w.branch} stays")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -756,6 +901,7 @@ def cmd_projects(ctx: Ctx, args) -> int:
         path = Path(args.path or ctx.root).expanduser().resolve()
         if not path.is_dir():
             raise WaterriseError(f"no such directory: {path}")
+        path = _project_path(path)
         home = args.home or "repo"
         if home == "repo" and not (path / "planning").is_dir():
             raise WaterriseError(f"{path} has no planning/ to register",
@@ -792,7 +938,7 @@ def _projects_home(ctx: Ctx, args) -> int:
     rows = client.registry()
     want = args.path or str(ctx.root)
     entry = next((r for r in rows if r.get("slug") == want), None) or \
-        next((r for r in rows if Path(r["path"]) == Path(want).expanduser().resolve()), None)
+        next((r for r in rows if Path(r["path"]) == _project_path(Path(want).expanduser().resolve())), None)
     if entry is None:
         raise WaterriseError(f"{want} is not a registered project", hint=f"{prog()} projects add")
     have = entry.get("home") or "repo"
@@ -849,6 +995,7 @@ def nodes() -> list[Node]:
                    arg("--all", action="store_true", help="include what is finished"),
                    arg("--by", choices=("agent", "user"), help="steps of one owner"),
                    arg("--everywhere", action="store_true", help="every registered repository"),
+                   arg("--worktree", metavar="NAME", help="only what is assigned to this worktree"),
                    json_flag],
              func=cmd_list),
         Node("show", "an item as text", args=[arg("id"), json_flag], func=cmd_show),
@@ -895,6 +1042,23 @@ def nodes() -> list[Node]:
                    arg("--port", type=int, help="where the service is, or starts"),
                    json_flag],
              func=cmd_projects),
+        Node("assign", "assign a plan to one of this project's worktrees, or to none",
+             args=[arg("id"), arg("name", nargs="?", help="main, or a worktree's name"),
+                   arg("--none", action="store_true", help="it can be worked on anywhere")],
+             func=cmd_assign),
+        Node("worktree", f"this project's worktrees, in {worktrees_mod.FOLDER}/ at the top of its main checkout",
+             children=[
+                 Node("add", "make one; its branch defaults to its name",
+                      args=[arg("name"), arg("--branch", help="the branch (default: NAME, the existing one if any)"),
+                            arg("--from", dest="from_", metavar="REF", help="where a new branch starts (default: the main checkout's HEAD)"),
+                            arg("--plan", metavar="ID", help="assign this plan to it")],
+                      func=cmd_worktree_add),
+                 Node("list", "name, branch, clean or not, ahead/behind, path and plans",
+                      args=[arg("--all", action="store_true", help="also those outside the folder"), json_flag],
+                      func=cmd_worktree_list),
+                 Node("remove", "git worktree remove: refused if dirty, holding an open plan, or the only home of an unmerged one; the branch stays",
+                      args=[arg("name")], func=cmd_worktree_remove),
+             ]),
         Node("install", "install this checkout into waterrise's own venv, with a launcher on PATH",
              args=[arg("--from", dest="from_", metavar="CHECKOUT",
                        help="the checkout (default: the one this runs from, else the last one)"),

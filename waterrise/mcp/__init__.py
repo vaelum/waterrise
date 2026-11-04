@@ -35,7 +35,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .. import client
+from ..context import locate
+from ..folder import worktree_homes
 from ..install import command
+from ..proc import hidden
 
 # How often a wait asks `planning status`. One status is a fraction of a second
 # of Python; the user clicking is minutes apart.
@@ -96,7 +99,7 @@ def known_repos(cwd: Path | None = None) -> list[tuple[str, Path, Path]]:
                    Path(r.get("planning") or Path(r["path"]) / "planning"))
                   for r in client.registry() if Path(r["path"]).is_dir()]
     if cwd is not None:
-        top = _git_toplevel(cwd)
+        top = _project_root(cwd)
         if top is not None:
             found.append(next((e for e in registered if _key(e[1]) == _key(top)),
                               (top.name, top, top / "planning")))
@@ -111,7 +114,7 @@ def _git_toplevel(path: Path, why: list[str] | None = None) -> Path | None:
     try:
         out = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
                              capture_output=True, text=True, timeout=10, encoding="utf-8",
-                             stdin=subprocess.DEVNULL)
+                             stdin=subprocess.DEVNULL, **hidden())
     except (OSError, subprocess.TimeoutExpired) as e:
         if why is not None:
             why.append(f"git did not run: {e}")
@@ -123,6 +126,16 @@ def _git_toplevel(path: Path, why: list[str] | None = None) -> Path | None:
     return Path(out.stdout.strip()).resolve()
 
 
+def _project_root(path: Path, why: list[str] | None = None) -> Path | None:
+    """The project `path` is in: its repository's main checkout, in whichever
+    worktree the path is."""
+    top = _git_toplevel(path, why)
+    if top is None:
+        return None
+    place = locate(top)
+    return place.main if place else top
+
+
 def _item_id(path: Path) -> str | None:
     try:
         return tomllib.loads(path.read_text(encoding="utf-8")).get("id")
@@ -131,6 +144,7 @@ def _item_id(path: Path) -> str | None:
 
 
 def _find_in(planning: Path, item_id: str) -> bool:
+    """Is the item in this folder alone? `_find_in_project` also looks under `worktrees/`."""
     if not planning.is_dir():
         return False
     for folder in ("draft", "todo", "in-progress", "done", "notes"):
@@ -138,6 +152,16 @@ def _find_in(planning: Path, item_id: str) -> bool:
             if item_id in f.read_text(encoding="utf-8", errors="replace") and _item_id(f) == item_id:
                 return True
     return False
+
+
+def _find_in_project(root: Path, planning: Path, item_id: str) -> bool:
+    if _find_in(planning, item_id):
+        return True
+    try:
+        homes = worktree_homes(planning.resolve(), root.resolve())
+    except OSError:
+        return False
+    return any(_find_in(h.planning, item_id) for h in homes)
 
 
 def resolve(spec: str, cwd: Path | None = None) -> Plan:
@@ -158,7 +182,7 @@ def resolve(spec: str, cwd: Path | None = None) -> Plan:
         here = _key(as_path)
         owner = next((e for e in known_repos(cwd) if here.startswith(_key(e[2]) + os.sep)), None)
         why: list[str] = []
-        repo = owner[1] if owner else _git_toplevel(as_path.parent, why)
+        repo = owner[1] if owner else _project_root(as_path.parent, why)
         if not item_id:
             raise PlanError(f"{as_path} is not a planning item: it has no id")
         if repo is None:
@@ -169,6 +193,7 @@ def resolve(spec: str, cwd: Path | None = None) -> Plan:
     repos = known_repos(cwd)
     if repo_name and Path(repo_name).expanduser().is_dir():
         root = Path(repo_name).expanduser().resolve()
+        root = _project_root(root) or root
         repos = [next((e for e in repos if _key(e[1]) == _key(root)), (root.name, root, root / "planning"))]
     elif repo_name:
         named = [r for r in repos if r[0] == repo_name]
@@ -177,7 +202,7 @@ def resolve(spec: str, cwd: Path | None = None) -> Plan:
                             f"known: {', '.join(sorted({r[0] for r in repos})) or 'none'} "
                             "(run `waterrise serve` in it once)")
         repos = named
-    hits = [r for r in repos if _find_in(r[2], item_id)]
+    hits = [r for r in repos if _find_in_project(r[1], r[2], item_id)]
     if not hits:
         raise PlanError(f"no item {item_id} in "
                         f"{', '.join(sorted({r[0] for r in repos})) or 'any known repository'}")
@@ -204,7 +229,7 @@ def _waterrise(plan: Plan, *args: str, timeout: float = 60) -> subprocess.Comple
     try:
         return subprocess.run([*command(), "--no-color", *args], cwd=plan.repo, env=env,
                               capture_output=True, text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL, encoding="utf-8")
+                              stdin=subprocess.DEVNULL, encoding="utf-8", **hidden())
     except subprocess.TimeoutExpired:
         raise PlanError(f"`waterrise {' '.join(args)}` took longer than {timeout:.0f}s") from None
     except OSError as e:
@@ -320,15 +345,40 @@ def fingerprint(st: dict) -> tuple:
     )
 
 
+def worktree_lines(plan: Plan, at: dict | None, home: str | None = None) -> list[str]:
+    """Where the plan's work belongs, and where its file is edited and committed.
+    Nothing for a plan on the main checkout that can be worked on anywhere."""
+    away = home is not None and _key(home) != _key(plan.repo)
+    if not at:
+        return [f"lives in {home}, on that worktree's branch only. Work there, and edit and commit the plan's "
+                f"file and answers there: git -C {home} commit -- <files>."] if away else []
+    if at.get("gone"):
+        return [f"worktree: {at['name']} was assigned, at {at['path']}, and no longer exists. Say so in the "
+                f"plan's log; `waterrise assign {plan.id} <worktree>` or `--none` changes it."]
+    if away:
+        return [f"worktree: {at['name']}. Work in {at['path']}. The plan lives there too: edit and commit its "
+                f"file and answers there, with the code: git -C {home} commit -- <files>."]
+    return [f"worktree: {at['name']}. Work in {at['path']}. The plan is read from the main checkout, because "
+            f"that worktree has no copy of it: edit it there, and commit it with git -C {plan.repo} commit -- <files>."]
+
+
+def _file_of(plan: Plan, st: dict) -> str:
+    """The plan's file, from the repository if it lives on the main checkout."""
+    rel = f"planning/{st.get('file', '')}"
+    home = st.get("home")
+    return str(Path(home) / rel) if home and _key(home) != _key(plan.repo) else rel
+
+
 def describe(plan: Plan, st: dict, a: Assessment, url: str | None, head: str) -> str:
     steps = st.get("steps", {})
     lines = [head, "",
              f"{plan.label} — {st.get('title', '')}",
-             f"repository: {plan.repo}   file: planning/{st.get('file', '')}",
+             f"repository: {plan.repo}   file: {_file_of(plan, st)}",
              f"folder: {st.get('folder')}   steps: {steps.get('done', 0)}/{steps.get('total', 0)} done"
              + (f"   next: {st['next']}" if st.get("next") else "")]
     if url:
         lines.append(f"page: {url}")
+    lines += worktree_lines(plan, st.get("worktree"), st.get("home"))
     lines.append("")
     lines += a.lines() or ["Nothing open on either side."]
     return "\n".join(lines)

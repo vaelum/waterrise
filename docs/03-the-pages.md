@@ -10,9 +10,22 @@ one service per user for every repository, on `127.0.0.1:8765`
 Each folder is a lane, and each item a card. Drag the cards into the order
 you want the work done; agents take work from `todo/` top-down. Dragging a
 card to another lane moves the item, with the same rules as
-`waterrise move`. A card shows what it needs and what needs it.
+`waterrise move`. A card shows what it needs and what needs it. All lanes are as
+tall as the fullest one, and a drop lands anywhere in a lane.
+
+If the project has worktrees, the page lists each with its branch, whether it
+is clean, how far it is from the main checkout, and its plans. A card shows the
+worktree it is assigned to, and a filter above the lanes shows one worktree's
+plans. A worktree that no longer exists shows as gone. On the index, a project
+shows how many worktrees it has.
 
 ## An item's page
+
+A plan's page has a picker for its worktree, "anywhere" being none. It writes
+the same as `waterrise assign`, and an approval is not affected. A plan that lives
+in a worktree is shown from there, with its branch on its card, and what you answer
+is written there. If picking a worktree makes a different copy count, the page says
+so.
 
 The top of every item's page is your to-do list, built from the files: the
 decisions to answer, the gates to approve, and your own steps whose `needs`
@@ -22,7 +35,11 @@ are all finished.
   option is marked, with the reason.
 - **Approvals.** Approve or disapprove a gated step, or the plan as a whole,
   with a note. An approval covers the step's text: if the step changes
-  afterwards, the page asks again and shows what changed since your answer.
+  afterwards, the page shows one line and **Review changes**. That opens a popup
+  with what changed, by phase, step and word, inline or side by side, where you
+  answer again. If the text changes while you read, the popup shows the newest
+  text and says so, and an answer on the older text is refused. Anything you were
+  typing is kept.
 - **Your steps.** Tick them when they are done.
 - **Comments.** Comment on the item, a section, a phase, a decision, a step
   or a finding. Whoever works the plan answers by changing it, and marks the

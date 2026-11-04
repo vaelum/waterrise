@@ -6,11 +6,13 @@ so "is this approval current?" has one answer everywhere.
 
 from __future__ import annotations
 
+import difflib
+import re
 from dataclasses import dataclass, field
 
 from . import answers as answers_mod
 from .folder import Item
-from .types import ID_RE, plan_hash, plan_snapshot, step_hash, step_snapshot
+from .types import ID_RE, jsonable, plan_hash, plan_snapshot, step_hash, step_snapshot
 
 DONE_STEP = ("done", "dropped")
 
@@ -114,6 +116,176 @@ def step_approval(step: dict, ans: dict) -> Approval:
 
 def plan_approval(item: Item, ans: dict) -> Approval:
     return _approval(ans.get("plan_approval"), plan_hash(item.data), plan_snapshot(item.data))
+
+
+# ---- what changed since an answer ------------------------------------------------ #
+
+PROSE_FIELDS = ("title", "goal", "details", "done_when")
+# Below this share of surviving words, marking every other word reads worse than
+# the old text followed by the new one.
+REWRITTEN_BELOW = 0.45
+_TOKEN = re.compile(r"\s+|\S+")
+
+
+def word_runs(old: str, new: str) -> dict:
+    """Two texts as runs of same, removed and added words, or, when little
+    survives, as a rewritten passage."""
+    a, b = _TOKEN.findall(old), _TOKEN.findall(new)
+    matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    words = [x for x in a if not x.isspace()]
+    kept = sum(1 for tag, i1, i2, _, _ in matcher.get_opcodes() if tag == "equal"
+               for x in a[i1:i2] if not x.isspace())
+    # Against the shorter text: words only added to, or only cut from, are marked.
+    total = min(len(words), sum(1 for x in b if not x.isspace()))
+    if total and kept / total < REWRITTEN_BELOW:
+        return {"rewritten": True, "old": old, "new": new}
+    runs: list[list[str]] = []
+
+    def run(kind: str, text: str) -> None:
+        if not text:
+            return
+        if runs and runs[-1][0] == kind:
+            runs[-1][1] += text
+        else:
+            runs.append([kind, text])
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            run("same", "".join(a[i1:i2]))
+        else:
+            run("del", "".join(a[i1:i2]))
+            run("add", "".join(b[j1:j2]))
+    return {"rewritten": False, "old": old, "new": new, "runs": runs}
+
+
+def _field_changes(old: dict, new: dict, skip: tuple[str, ...] = ("id", "step")) -> list[dict]:
+    out = []
+    for key in sorted(set(old) | set(new)):
+        if key in skip or old.get(key) == new.get(key):
+            continue
+        before, after = old.get(key), new.get(key)
+        change = {"field": key, "old": before, "new": after}
+        if key in PROSE_FIELDS and isinstance(before, str) and isinstance(after, str):
+            change["prose"] = word_runs(before, after)
+        out.append(change)
+    return out
+
+
+def _moved(old: list[str], new: list[str]) -> set[str]:
+    """Of the ids in both lists, those that changed places: what is outside the
+    longest run of ids in the same order."""
+    a = [x for x in old if x in new]
+    b = [x for x in new if x in old]
+    same: set[str] = set()
+    for block in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        same.update(a[block.a:block.a + block.size])
+    return set(a) - same
+
+
+def _plural(n: int, word: str) -> str:
+    return f"{n} {word}" + ("" if n == 1 else "s")
+
+
+def _summary(fields: int, steps: int, moves: dict[str, int]) -> str:
+    """"3 fields changed in 2 steps, 1 step added"."""
+    parts = []
+    if fields:
+        parts.append(_plural(fields, "field") + " changed" + (f" in {_plural(steps, 'step')}" if steps else ""))
+    for what in ("added", "removed", "moved"):
+        for kind in ("step", "phase"):
+            n = moves.get(f"{kind} {what}", 0)
+            if n:
+                parts.append(f"{_plural(n, kind)} {what}")
+    return ", ".join(parts) or "Nothing differs"
+
+
+UNAVAILABLE = {"available": False, "count": 0, "summary": "The earlier text was not kept, so the difference is unavailable"}
+
+
+def compare_steps(old: object, new: dict) -> dict:
+    """What changed in one step since its snapshot `old`."""
+    if not isinstance(old, dict):
+        return dict(UNAVAILABLE)
+    fields = _field_changes(step_snapshot(jsonable(old)), jsonable(new))
+    return {"available": True, "kind": "step", "fields": fields, "count": len(fields),
+            "summary": _summary(len(fields), 0, {})}
+
+
+def compare_plans(old: object, new: list) -> dict:
+    """What changed in a plan's phases and steps since its snapshot `old`:
+    matched by id, and each change once."""
+    if not isinstance(old, list):
+        return dict(UNAVAILABLE)
+    # An older snapshot is read as a new one is made, so defaults filled in
+    # since do not look like changes.
+    old_phases = [dict(ph, step=[step_snapshot(s) for s in ph.get("step", [])])
+                  for ph in jsonable(old) if isinstance(ph, dict)]
+    new_phases = jsonable(new)
+    old_by_id = {ph.get("id"): ph for ph in old_phases}
+    new_by_id = {ph.get("id"): ph for ph in new_phases}
+    old_steps = {s.get("id"): (s, ph.get("id")) for ph in old_phases for s in ph["step"]}
+    new_steps = {s.get("id"): (s, ph.get("id")) for ph in new_phases for s in ph.get("step", [])}
+    moved_phases = _moved(list(old_by_id), list(new_by_id))
+    phases, same_phases = [], 0
+    n_fields = n_steps = 0
+    moves: dict[str, int] = {}
+
+    def tally(what: str, n: int = 1) -> None:
+        moves[what] = moves.get(what, 0) + n
+
+    def line(s: dict) -> dict:
+        return {"id": s.get("id"), "title": s.get("title")}
+
+    for ph in new_phases:
+        pid = ph.get("id")
+        before = old_by_id.get(pid)
+        fields = _field_changes(before, ph) if before else []
+        here_old = [s.get("id") for s in before["step"]] if before else []
+        here_new = [s.get("id") for s in ph.get("step", [])]
+        moved_here = _moved(here_old, here_new)
+        steps, same = [], []
+        for s in ph.get("step", []):
+            sid = s.get("id")
+            if sid not in old_steps:
+                steps.append(line(s) | {"status": "added", "step": s, "fields": []})
+                if before is not None:      # in a new phase, the phase says it
+                    tally("step added")
+                continue
+            was, was_in = old_steps[sid]
+            changed = _field_changes(was, s)
+            came_from = was_in if was_in != pid else None
+            is_moved = came_from is not None or sid in moved_here
+            if not changed and not is_moved:
+                same.append(line(s))
+                continue
+            n_fields += len(changed)
+            n_steps += bool(changed)
+            tally("step moved", int(is_moved))
+            steps.append(line(s) | {"status": "moved" if is_moved and not changed else "changed",
+                                    "moved": is_moved, "from_phase": came_from, "fields": changed})
+        for s in before["step"] if before else []:
+            if s.get("id") not in new_steps:
+                steps.append(line(s) | {"status": "removed", "step": s, "fields": []})
+                tally("step removed")
+        status = "added" if before is None else "moved" if pid in moved_phases and not (fields or steps) else \
+            "changed" if fields or steps or pid in moved_phases else "same"
+        if status == "same":
+            same_phases += 1
+        if before is None:
+            tally("phase added")
+        n_fields += len(fields)
+        tally("phase moved", int(pid in moved_phases))
+        phases.append({"id": pid, "title": ph.get("title"), "status": status, "moved": pid in moved_phases,
+                       "fields": fields, "steps": steps, "same_steps": same})
+    for ph in old_phases:
+        if ph.get("id") not in new_by_id:
+            tally("phase removed")
+            phases.append({"id": ph.get("id"), "title": ph.get("title"), "status": "removed", "moved": False,
+                           "fields": [], "same_steps": [],
+                           "steps": [line(s) | {"status": "removed", "step": s, "fields": []}
+                                     for s in ph["step"] if s.get("id") not in new_steps]})
+    count = n_fields + sum(moves.values())
+    return {"available": True, "kind": "plan", "phases": phases, "same_phases": same_phases, "count": count,
+            "summary": _summary(n_fields, n_steps, moves)}
 
 
 # ---- summaries ---------------------------------------------------------------- #

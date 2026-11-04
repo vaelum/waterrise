@@ -166,7 +166,7 @@ class Running:
         return str(self.health.get("version", "?"))
 
 
-def find(port: int | None = None) -> Running | None:
+def find(port: int | None = None, timeout: float = 0.6) -> Running | None:
     """The running service: at the port service.json names, else at `port`."""
     tried = set()
     info = service_info()
@@ -175,7 +175,7 @@ def find(port: int | None = None) -> Running | None:
             continue
         tried.add(p)
         try:
-            h = health(p)
+            h = health(p, timeout=timeout)
         except Other:
             continue
         if h:
@@ -224,6 +224,12 @@ def _detached() -> dict:
     return {"start_new_session": True}
 
 
+# Generous: it returns as soon as the service answers, or as soon as it exits. A
+# new service asks git about each registered project before it opens its port,
+# and on a loaded machine 5 s was too short (2026-11-02, in the Windows VM).
+START_WAIT = 30.0
+
+
 def _spawn(port: int) -> int:
     """Start the service detached and return its real port."""
     sdir = state_dir()
@@ -240,7 +246,7 @@ def _spawn(port: int) -> int:
         proc = subprocess.Popen(
             [_interpreter(), "-P", "-c", _BOOT, str(_src()), str(port), str(sdir)],
             cwd=sdir, stdin=devnull, stdout=out, stderr=out, close_fds=True, **_detached())
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + START_WAIT
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
@@ -258,7 +264,7 @@ def _spawn(port: int) -> int:
             except Other:
                 pass
         time.sleep(0.05)
-    raise WaterriseError("the planning service did not answer within 5 s", hint=f"see {log}")
+    raise WaterriseError(f"the planning service did not answer within {START_WAIT:.0f} s", hint=f"see {log}")
 
 
 def _lock():
@@ -292,7 +298,11 @@ def ensure(port: int | None = None) -> tuple[Running, str]:
         return running, "running"
     fh = _lock()
     try:
-        running = find(port)
+        # Patient under the lock: a service that is merely busy (a loaded
+        # machine, another page's git) must not be taken for none and get a
+        # second one beside it (2026-11-02, two at once in the Windows VM). A
+        # dead one is refused at once, so this costs nothing then.
+        running = find(port, timeout=5.0)
         if running and running.api >= API:
             return running, "running"
         what = "started"

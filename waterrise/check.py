@@ -24,8 +24,9 @@ from .context import prog, short
 from .folder import Folder, Item
 from .state import (DONE_STEP, decision_local, decision_state, plan_approval, satisfied,
                     step_approval, summarize)
-from .types import (FORMAT, ID_RE, KIND_OF_LETTER, LOCAL_RE, NOTES_FOLDER, PROTOCOLS_FOLDER, REPORTS_FOLDER,
+from .types import (ASSIGNMENTS_FILE, FORMAT, ID_RE, KIND_OF_LETTER, LOCAL_RE, NOTES_FOLDER, PROTOCOLS_FOLDER, REPORTS_FOLDER,
                     STATE_FOLDERS, Problem)
+from .proc import hidden
 
 # kind -> folders it may be in
 ALLOWED = {
@@ -209,7 +210,7 @@ def _ids_at_head(folder: Folder) -> dict[str, str] | None:
     try:
         names = subprocess.run(["git", "-C", str(folder.repo), "ls-tree", "-r", "--name-only", "HEAD",
                                 "--", rel], capture_output=True, text=True, timeout=10, encoding="utf-8",
-                                stdin=subprocess.DEVNULL)
+                                stdin=subprocess.DEVNULL, **hidden())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if names.returncode != 0:
@@ -220,7 +221,7 @@ def _ids_at_head(folder: Folder) -> dict[str, str] | None:
             continue
         shown = subprocess.run(["git", "-C", str(folder.repo), "show", f"HEAD:{name}"],
                                capture_output=True, text=True, timeout=10, encoding="utf-8",
-                               stdin=subprocess.DEVNULL)
+                               stdin=subprocess.DEVNULL, **hidden())
         if shown.returncode != 0:
             continue
         m = _ID_LINE.search(shown.stdout)
@@ -510,6 +511,84 @@ def _check_answers(report: Report, item: Item, ans: dict, user: str) -> None:
             report.add(item.rel, "info", f"comment {c.get('id')} is open: {str(c.get('text', ''))[:80]}")
 
 
+def _git_out(cwd: Path, *args: str) -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=10,
+                             encoding="utf-8", stdin=subprocess.DEVNULL, **hidden())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def edited_copy(root: Path, planning: Path, checkout: Path) -> list[str]:
+    """Files of the planning folder's copy in the linked worktree `checkout`
+    (paths from its top) that were changed there: uncommitted, or by commits on
+    its branch since it left the main checkout's HEAD."""
+    try:
+        rel = planning.relative_to(root).as_posix()
+    except ValueError:
+        return []       # a central project's folder is not in the repository
+    if not (checkout / rel).is_dir():
+        return []
+    files: set[str] = set()
+    status = _git_out(checkout, "status", "--porcelain", "-z", "--", rel) or ""
+    entries = iter(status.split("\0"))
+    for e in entries:
+        if not e:
+            continue
+        files.add(e[3:])
+        if e[0] in "RC":
+            next(entries, None)     # a rename's or a copy's old name follows
+    main_head = (_git_out(root, "rev-parse", "HEAD") or "").strip()
+    base = (_git_out(checkout, "merge-base", "HEAD", main_head) or "").strip() if main_head else ""
+    if base:
+        files.update(x for x in (_git_out(checkout, "diff", "--name-only", "-z", base, "HEAD", "--", rel) or "").split("\0") if x)
+    return sorted(files)
+
+
+def worktree_warnings(report: Report, root: Path, planning: Path, checkout: Path | None) -> None:
+    """What git's view of the project's worktrees says is out of place: the
+    folder not ignored, an open plan assigned to a worktree that is gone, and,
+    run inside a linked worktree, what that worktree holds that should be
+    elsewhere. Where a worktree is, is never a warning."""
+    from . import worktrees
+
+    for it in report.folder.items:
+        if it.parsed and it.kind == "plan" and it.id and it.folder != "done":
+            at = worktrees.where(root, report.folder.assignment(it.id))
+            if at and at["gone"]:
+                report.add(it.rel, "warn", f"assigned to the worktree {at['name']}, which no longer exists: "
+                                           f"`{short()} assign {it.id} <worktree>`, or `--none`")
+    if (root / worktrees.FOLDER).is_dir() and worktrees.ignored(root) is False:
+        report.add(f"{worktrees.FOLDER}/", "warn", "is not ignored by git, so it shows as untracked; "
+                                                   f"add {worktrees.IGNORE_RULE} to the top .gitignore")
+    if checkout is None or checkout == root:
+        return
+    try:
+        prefix = planning.relative_to(root).as_posix() + "/"
+    except ValueError:
+        return
+    copy = next((c for c in report.folder.copies.values() if c.repo == checkout), None)
+    by_rel = {it.rel: it for it in copy.items if it.id} if copy else {}
+    for name in edited_copy(root, planning, checkout):
+        inner = name[len(prefix):] if name.startswith(prefix) else name
+        answers = inner[len("answers/"):-len(".json")] if inner.startswith("answers/") and inner.endswith(".json") else None
+        item_id = answers or (by_rel[inner].id if inner in by_rel else None)
+        real = report.folder.get(item_id) if item_id else None
+        if real is None:
+            # In a worktree under `worktrees/`, what is only there lives there
+            # and was read as such; anything else here has no reader.
+            if copy is None or item_id is None:
+                report.add(str(checkout / name), "warn", "edited in this worktree's copy, which nothing reads; "
+                                                         f"this project's planning folder is {planning}: edit it there")
+            continue
+        if real.home is not None and real.home.checkout == checkout:
+            continue        # its home: where it is edited
+        at = report.folder.answers_path(real.id) if answers else real.path
+        report.add(str(checkout / name), "warn", f"edited in this worktree's copy of {real.id}, which lives "
+                                                 f"elsewhere; nothing reads this one: edit {at} there")
+
+
 def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> Report:
     today = today or _dt.date.today()
     report = Report(folder=folder)
@@ -557,7 +636,7 @@ def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> R
     if git:
         head = _ids_at_head(folder)
         for it in folder.items:
-            before = (head or {}).get(it.rel)
+            before = (head or {}).get(it.rel) if it.home is None else None
             if before and it.id and before != it.id:
                 report.add(it.rel, "error", f"id changed from {before} (at HEAD) to {it.id}; "
                                             "an id never changes", 1)
@@ -594,6 +673,14 @@ def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> R
     cyc = _cycle(plan_needs)
     if cyc:
         report.add("", "error", "plans need each other in a circle: " + " → ".join(cyc))
+
+    if folder.assignments_problem:
+        report.add(ASSIGNMENTS_FILE, "error", f"cannot be read: {folder.assignments_problem}")
+    for iid in folder.assignments:
+        if iid not in ids:
+            report.add(ASSIGNMENTS_FILE, "warn", f"assigns {iid}, but no item has that id")
+        elif ids[iid].kind != "plan":
+            report.add(ASSIGNMENTS_FILE, "warn", f"assigns {iid}, a {ids[iid].kind}; only a plan can be assigned")
 
     for iid, path in folder.answer_files.items():
         if iid not in ids:

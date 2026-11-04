@@ -81,7 +81,7 @@
     const r = await fetch(path, opt);
     let data = null;
     try { data = await r.json(); } catch (e) { data = null; }
-    if (!r.ok) throw new Error((data && data.error) || ('HTTP ' + r.status));
+    if (!r.ok) throw Object.assign(new Error((data && data.error) || ('HTTP ' + r.status)), { status: r.status });
     return data;
   }
 
@@ -230,76 +230,10 @@
         side.append(h('p', { class: 'lead' }, 'Nothing waits on you.'));
       }
       const out = [h('section', { class: 'intro' }, h('div', { class: 'in' }, intro, side))];
-      // Worktrees under their main checkout: the one whose .git is the common dir.
-      const groups = new Map();
-      for (const r of repos) {
-        const key = r.common || r.path;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push(r);
-      }
       const grid = h('div', { class: 'grid' });
-      for (const [common, list] of groups) {
-        list.sort((a, b) => (common === a.path + '/.git' ? -1 : 0) - (common === b.path + '/.git' ? -1 : 0) || a.slug.localeCompare(b.slug));
-        const [first, ...rest] = list;
-        const card = h('div', { class: 'card repo-card' }, repoLine(first));
-        if (rest.length) {
-          const d = h('details', {}, h('summary', { class: 'small muted' }, `${rest.length} worktree${rest.length > 1 ? 's' : ''}`));
-          for (const r of rest) d.append(h('div', { class: 'small' }, repoLine(r)));
-          card.append(d);
-        }
-        grid.append(card);
-      }
+      for (const r of repos) grid.append(h('div', { class: 'card repo-card' }, repoLine(r)));
       if (n) out.push(h('section', { class: 'repos' }, h('h2', {}, 'Repositories'), grid));
       main.replaceChildren(...out);
-    }
-    // A drop-down in the page's own look: a pill that opens a list. The
-    // keyboard works as on a native one: arrows, Home/End, Enter, Escape.
-    function picker(label, choices, value, onpick) {
-      const name = c => [h('span', { class: 'pick-name' }, c.text), h('span', { class: 'pick-n' }, String(c.n))];
-      const current = () => choices.find(c => c.value === value) || choices[0];
-      const btn = h('button', { type: 'button', class: 'picker-btn', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-label': label });
-      const list = h('ul', { class: 'picker-list', role: 'listbox', 'aria-label': label, tabindex: '-1', hidden: true });
-      const wrap = h('div', { class: 'picker' }, btn, list);
-      let at = 0;
-      const opts = choices.map((c, i) => h('li', { role: 'option', id: `pick-${i}`, 'data-value': c.value,
-        onmousemove: () => mark(i), onclick: () => choose(i) }, h('span', { class: 'pick-check', 'aria-hidden': 'true' }, '✓'), ...name(c)));
-      list.append(...opts);
-      function paint() {
-        btn.replaceChildren(...name(current()), h('span', { class: 'pick-caret', 'aria-hidden': 'true' }));
-        opts.forEach((o, i) => o.setAttribute('aria-selected', String(choices[i].value === value)));
-      }
-      function mark(i) {
-        at = Math.max(0, Math.min(opts.length - 1, i));
-        opts.forEach((o, j) => o.classList.toggle('at', j === at));
-        list.setAttribute('aria-activedescendant', opts[at].id);
-        opts[at].scrollIntoView({ block: 'nearest' });
-      }
-      function open() {
-        list.hidden = false; btn.setAttribute('aria-expanded', 'true');
-        mark(Math.max(0, choices.findIndex(c => c.value === value)));
-        list.focus();
-        document.addEventListener('pointerdown', outside, true);
-      }
-      function close(refocus) {
-        if (list.hidden) return;
-        list.hidden = true; btn.setAttribute('aria-expanded', 'false');
-        document.removeEventListener('pointerdown', outside, true);
-        if (refocus) btn.focus();
-      }
-      function outside(e) { if (!wrap.contains(e.target)) close(false); }
-      function choose(i) { value = choices[i].value; paint(); close(true); onpick(value); }
-      btn.addEventListener('click', () => (list.hidden ? open() : close(true)));
-      btn.addEventListener('keydown', e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); open(); } });
-      list.addEventListener('keydown', e => {
-        const keys = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: opts.length - 1, PageDown: at + 5, PageUp: at - 5 };
-        if (e.key in keys) { e.preventDefault(); mark(keys[e.key]); }
-        else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(at); }
-        else if (e.key === 'Escape') { e.preventDefault(); close(true); }
-        else if (e.key === 'Tab') close(false);
-      });
-      list.addEventListener('focusout', e => { if (!wrap.contains(e.relatedTarget)) close(false); });
-      paint();
-      return wrap;
     }
     // What a waiting item asks for, counted: "2 decisions", "1 gate".
     function waitTags(list) {
@@ -324,6 +258,7 @@
       } else {
         const parts = ['draft', 'todo', 'in-progress', 'done', 'notes'].filter(k => counts[k]).map(k => `${k} ${counts[k]}`);
         if (!r.typed) parts.push('not typed' + ((r.legacy || []).length ? ` · ${r.legacy.length} Markdown` : ''));
+        if (r.worktree_count) parts.push(`${r.worktree_count} worktree${r.worktree_count > 1 ? 's' : ''}`);
         if (parts.length) meta.append(h('div', { class: 'counts' }, parts.join(' · ')));
       }
       return h('div', {}, line, meta);
@@ -331,6 +266,58 @@
     await load();
     watch(load, 'index');
     poll(load, 30000);
+  }
+
+  // A drop-down in the page's own look: a pill that opens a list. The
+  // keyboard works as on a native one: arrows, Home/End, Enter, Escape.
+  function picker(label, choices, value, onpick) {
+    const name = c => [h('span', { class: 'pick-name' }, c.text), h('span', { class: 'pick-n' }, String(c.n))];
+    const current = () => choices.find(c => c.value === value) || choices[0];
+    const btn = h('button', { type: 'button', class: 'picker-btn', 'aria-haspopup': 'listbox', 'aria-expanded': 'false', 'aria-label': label });
+    const list = h('ul', { class: 'picker-list', role: 'listbox', 'aria-label': label, tabindex: '-1', hidden: true });
+    const wrap = h('div', { class: 'picker' }, btn, list);
+    let at = 0;
+    const opts = choices.map((c, i) => h('li', { role: 'option', id: `pick-${i}`, 'data-value': c.value,
+      onmousemove: () => mark(i), onclick: () => choose(i) }, h('span', { class: 'pick-check', 'aria-hidden': 'true' }, '✓'), ...name(c)));
+    list.append(...opts);
+    function paint() {
+      btn.replaceChildren(...name(current()), h('span', { class: 'pick-caret', 'aria-hidden': 'true' }));
+      opts.forEach((o, i) => o.setAttribute('aria-selected', String(choices[i].value === value)));
+    }
+    function mark(i) {
+      at = Math.max(0, Math.min(opts.length - 1, i));
+      opts.forEach((o, j) => o.classList.toggle('at', j === at));
+      list.setAttribute('aria-activedescendant', opts[at].id);
+      opts[at].scrollIntoView({ block: 'nearest' });
+    }
+    function open() {
+      list.classList.remove('from-left');
+      list.hidden = false; btn.setAttribute('aria-expanded', 'true');
+      if (list.getBoundingClientRect().left < 8) list.classList.add('from-left');
+      mark(Math.max(0, choices.findIndex(c => c.value === value)));
+      list.focus();
+      document.addEventListener('pointerdown', outside, true);
+    }
+    function close(refocus) {
+      if (list.hidden) return;
+      list.hidden = true; btn.setAttribute('aria-expanded', 'false');
+      document.removeEventListener('pointerdown', outside, true);
+      if (refocus) btn.focus();
+    }
+    function outside(e) { if (!wrap.contains(e.target)) close(false); }
+    function choose(i) { value = choices[i].value; paint(); close(true); onpick(value); }
+    btn.addEventListener('click', () => (list.hidden ? open() : close(true)));
+    btn.addEventListener('keydown', e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); open(); } });
+    list.addEventListener('keydown', e => {
+      const keys = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: opts.length - 1, PageDown: at + 5, PageUp: at - 5 };
+      if (e.key in keys) { e.preventDefault(); mark(keys[e.key]); }
+      else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); choose(at); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(true); }
+      else if (e.key === 'Tab') close(false);
+    });
+    list.addEventListener('focusout', e => { if (!wrap.contains(e.relatedTarget)) close(false); });
+    paint();
+    return wrap;
   }
 
   // ---- one repository ------------------------------------------------------ //
@@ -341,6 +328,7 @@
     bar.hidden = true;
     let byId = new Map();
     let drag = null;  // a drag in progress: no redraw under it
+    let onlyWorktree = '';  // the lanes' filter
     async function load() {
       let r;
       try { r = await api('GET', `/api/r/${slug}`); say(''); } catch (e) { say(e.message, true); return; }
@@ -361,6 +349,17 @@
       const all = r.items || [];
       byId = new Map(all.filter(i => i.id).map(i => [i.id, i]));
       if (all.some(i => i.folder !== 'notes' && i.folder !== 'reports')) {
+        const trees = r.worktrees || [];
+        const assigned = all.filter(i => i.worktree);
+        const gone = [...new Set(assigned.filter(i => i.worktree.gone).map(i => i.worktree.name))];
+        if (assigned.length || all.some(i => i.home)) {
+          const names = trees.map(w => w.name).concat(gone);
+          if (!names.includes(onlyWorktree)) onlyWorktree = '';
+          out.push(h('div', { class: 'lane-filter' }, picker('Show the plans of one worktree',
+            [{ value: '', text: 'Every worktree', n: all.filter(i => LANES.includes(i.folder)).length }]
+              .concat(names.map(name => ({ value: name, text: gone.includes(name) ? `${name} (gone)` : name, n: all.filter(i => belongsTo(i, name)).length }))),
+            onlyWorktree, value => { onlyWorktree = value; filterLanes(); })));
+        }
         const lanes = h('div', { class: 'lanes' });
         for (const folder of LANES) {
           const items = all.filter(i => i.folder === folder);
@@ -375,6 +374,7 @@
         out.push(lanes, h('p', { class: 'muted small lane-hint' },
           'Drag a card, or use its ⠿ handle with the arrow keys, to order a lane or move it to another. ',
           'A move is ', h('code', {}, 'planning move'), ': a lane whose rules the item does not meet says why and takes no drop.'));
+        if (trees.length > 1 || gone.length) out.push(h('h2', {}, 'Worktrees'), worktreeList(slug, trees, gone, assigned));
       }
       const notes = all.filter(i => i.folder === 'notes');
       if (notes.length) {
@@ -410,6 +410,36 @@
       const keep = a && a.classList.contains('handle') ? a.closest('.item-card').dataset.id : null;
       main.replaceChildren(...out);
       if (keep) { const hd = main.querySelector(`.item-card[data-id="${keep}"] .handle`); if (hd) hd.focus(); }
+      filterLanes();
+    }
+
+    // Hidden, not left out: a saved order still has to name the whole lane.
+    function filterLanes() {
+      for (const card of main.querySelectorAll('.lane .item-card[data-id]')) {
+        const it = byId.get(card.dataset.id);
+        card.hidden = Boolean(onlyWorktree) && !(it && belongsTo(it, onlyWorktree));
+      }
+    }
+
+    // A plan belongs to its assigned worktree, or to the one it lives in.
+    function belongsTo(it, name) {
+      return Boolean((it.worktree && it.worktree.name === name) || (it.home && it.home.name === name));
+    }
+    function worktreeList(slug, trees, gone, assigned) {
+      const plansOf = ids => ids.length ? ids.flatMap((id, i) => [i ? ', ' : '', h('a', { href: `/r/${slug}/i/${id}` }, id)]) : [h('span', { class: 'muted' }, 'no plans')];
+      return h('div', { class: 'rows worktrees' },
+        trees.map(w => h('div', { class: 'worktree-row' },
+          h('span', { class: 'wt-name' }, w.name),
+          h('span', { class: 'wt-state' }, w.branch || 'detached', ' ',
+            badge(w.clean === false ? 'dirty' : 'clean', w.clean === false ? 'warn' : 'ok'),
+            w.ahead ? ` +${w.ahead}` : '', w.behind ? ` -${w.behind}` : ''),
+          h('span', { class: 'wt-plans' }, ...plansOf(w.plans)),
+          h('span', { class: 'path wt-path' }, w.path))),
+        gone.map(name => h('div', { class: 'worktree-row' },
+          h('span', { class: 'wt-name' }, name),
+          h('span', { class: 'wt-state' }, badge('gone', 'warn')),
+          h('span', { class: 'wt-plans' }, ...plansOf(assigned.filter(i => i.worktree.name === name).map(i => i.id))),
+          h('span', { class: 'path wt-path muted' }, assigned.find(i => i.worktree.name === name).worktree.path))));
     }
 
     // ---- order: drag within a lane, or the handle and the arrow keys ---- //
@@ -451,8 +481,10 @@
         note.textContent = why.length ? 'Cannot move here: ' + why.join('; ') : '';
       }
     }
+    // The whole lane, not only its cards: a short lane's empty part takes a drop too.
     function dropTarget(list) {
-      list.addEventListener('dragover', e => {
+      const lane = list.closest('.lane');
+      lane.addEventListener('dragover', e => {
         if (!drag) return;
         if (refusal(drag.it, list.dataset.folder).length) return;  // no preventDefault: no drop here
         e.preventDefault();
@@ -462,7 +494,7 @@
         if (after) { if (after.previousElementSibling !== drag.el) list.insertBefore(drag.el, after); }
         else if (list.lastElementChild !== drag.el) list.append(drag.el);
       });
-      list.addEventListener('drop', e => { if (drag && !refusal(drag.it, list.dataset.folder).length) { e.preventDefault(); drag.dropped = true; } });
+      lane.addEventListener('drop', e => { if (drag && !refusal(drag.it, list.dataset.folder).length) { e.preventDefault(); drag.dropped = true; } });
     }
     function draggable(card, it) {
       card.draggable = true;
@@ -559,6 +591,15 @@
         card.querySelector('.progress > span').style.width = pct + '%';
       }
       const b = h('div', { class: 'badges' });
+      if (it.worktree || it.home) {
+        const name = it.worktree ? (it.worktree.gone ? `${it.worktree.name} (gone)` : it.worktree.name) : '';
+        const on = it.home ? it.home.branch || it.home.name : '';
+        const branch = on && !(it.worktree && it.worktree.name === on) ? `on ${on}` : '';
+        const chip = badge([name, branch].filter(Boolean).join(' '), it.worktree && it.worktree.gone ? 'warn' : 'muted');
+        chip.classList.add('worktree-chip');
+        chip.title = it.home ? it.home.path : it.worktree.path;
+        b.append(chip);
+      }
       if (it.for_user.length) b.append(badge(`${it.for_user.length} for you`, 'open'));
       if (it.for_agent.length) b.append(badge(`${it.for_agent.length} for the agent`, 'agent'));
       const open = (it.needs || []).filter(n => !n.done);
@@ -648,7 +689,11 @@
         if (draftKey && drafts.get(draftKey) === __draft) drafts.delete(draftKey);
         say('saved ' + new Date().toLocaleTimeString()); etag = null; if (what !== 'quiet') load(true);
       }
-      catch (e) { say('not saved: ' + e.message, true); toast('Not saved: ' + e.message); }
+      catch (e) {
+        say('not saved: ' + e.message, true); toast('Not saved: ' + e.message);
+        // Refused as outdated: show the newest text; the note stays in `drafts`.
+        if (e.status === 409) { review.acted = false; etag = null; load(true); }
+      }
     }
 
     function render() {
@@ -678,6 +723,7 @@
       if ((d.touches || []).length) kv.push(h('div', { class: 'kv' }, 'touches: ', ...d.touches.map((x, i) => [i ? ', ' : '', h('code', {}, x)])));
       if (d.created) kv.push(h('div', { class: 'kv' }, `created ${d.created} · updated ${d.updated}`));
       if (kv.length) out.push(h('div', { class: 'kvs' }, kv));
+      if (v.kind === 'plan' && (v.worktrees || []).length) out.push(worktreePicker(v));
 
       if (v.kind === 'plan' && v.plan_approval_required) out.push(planApproval(v));
 
@@ -756,6 +802,7 @@
       main.replaceChildren(h('article', { class: 'article' }, out), h('aside', { class: 'todo-aside' }, todoPanel(v)));
       document.body.classList.toggle('focus', focusOn());
       renderBar(v, decisions, ans);
+      if (review.el.open) drawReview();
       if (location.hash && !render.scrolled) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); render.scrolled = true; }
     }
 
@@ -766,6 +813,7 @@
     function jump(local) {
       return (e) => {
         e.preventDefault();
+        if (staleApproval(view, local)) return openReview();
         const t = document.getElementById(local || 'plan-approval');
         if (!t) return;
         if (t.tagName === 'DETAILS') t.open = true;
@@ -817,15 +865,18 @@
       const tag = pa.status === 'approved' ? badge('approved', 'ok') : pa.status === 'disapproved' ? badge('disapproved', 'gate') : badge('gate', 'gate');
       box.append(h('div', { class: 'box-head' }, h('h3', {}, 'The plan as a whole'), tag));
       box.append(h('p', { class: 'status' }, statusText(pa, 'these phases and steps')));
-      if (pa.status === 'stale') box.append(diff(pa.snapshot, pa.now));
-      box.append(approveRow(pa, 'approval/' + v.id, 'Approve plan'));
+      if (pa.status === 'stale') box.append(reviewButton());
+      else box.append(approveRow(pa, 'approval/' + v.id, 'Approve plan'));
       return box;
     }
 
     function statusText(a, what) {
       if (a.status === 'approved') return `You approved ${what} at ${a.at}.` + (a.note ? ` Note: ${a.note}` : '');
       if (a.status === 'disapproved') return `You disapproved ${what} at ${a.at}.` + (a.note ? ` Note: ${a.note}` : '');
-      if (a.status === 'stale') return `You ${a.verdict} ${what} at ${a.at}, but they have changed since. Look at the difference and answer again.`;
+      if (a.status === 'stale') {
+        const c = a.changes || {};
+        return `You ${a.verdict} ${what} at ${a.at}. ` + (c.available ? `Since then: ${c.summary}.` : `It has changed since. ${c.summary || ''}.`);
+      }
       return `Not approved yet.`;
     }
 
@@ -834,11 +885,12 @@
       const note = draftBox(h('input', { type: 'text', placeholder: 'A note for the agent (say why when you disapprove)' }), key, a.note);
       const verdict = (a.status === 'approved' || a.status === 'disapproved') ? a.status : null;
       const hint = h('div', { class: 'kv' }, verdict ? 'The note saves as you type.' : 'The note is sent with Approve or Disapprove.');
-      const send = (v) => { const body = { verdict: v, note: note.value, __draft: note.value }; save(path, body, undefined, key); };
+      // `sha256`: the text this answer is about; the service refuses it if that has changed.
+      const send = (v) => { const body = { verdict: v, note: note.value, sha256: a.current, __draft: note.value }; save(path, body, undefined, key); };
       if (verdict) {
         let t = null;
         note.addEventListener('input', () => { clearTimeout(t); say('typing…'); t = setTimeout(() => {
-          save(path, { verdict, note: note.value, __draft: note.value }, 'quiet', key); }, 600); });
+          save(path, { verdict, note: note.value, sha256: a.current, __draft: note.value }, 'quiet', key); }, 600); });
       }
       const row = h('div', { class: 'row' },
         h('button', { class: 'approve' + (a.status === 'approved' ? ' on' : ''), onclick: () => send('approved') }, a.status === 'approved' ? 'Approved' : (label || 'Approve')),
@@ -994,26 +1046,198 @@
         const a = (view.approvals || {})[s.id] || { status: 'none' };
         const box = h('div', { class: 'gatebox ' + (a.status === 'approved' ? 'approved' : a.status === 'disapproved' ? 'disapproved' : '') });
         box.append(h('div', { class: 'small' }, h('strong', {}, 'Needs your approval before it starts. '), statusText(a, 'this step')));
-        if (a.status === 'stale') box.append(diff(a.snapshot, a.now));
-        if (state !== 'done' && state !== 'dropped') box.append(approveRow(a, `approval/${view.id}/${s.id}`));
+        const finished = state === 'done' || state === 'dropped';
+        if (a.status === 'stale' && !finished) box.append(reviewButton());
+        else if (!finished) box.append(approveRow(a, `approval/${view.id}/${s.id}`));
         li.append(box);
       }
       li.append(comments(s.id));
       return li;
     }
 
-    function diff(before, after) {
-      const a = JSON.stringify(before, null, 2).split('\n'), b = JSON.stringify(after, null, 2).split('\n');
-      const n = a.length, m = b.length, L = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-      for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
-      const box = h('div', { class: 'diff' });
-      let i = 0, j = 0;
-      while (i < n || j < m) {
-        if (i < n && j < m && a[i] === b[j]) { box.append(h('div', {}, '  ' + a[i])); i++; j++; }
-        else if (j < m && (i >= n || L[i][j + 1] >= L[i + 1][j])) { box.append(h('div', { class: 'add' }, '+ ' + b[j])); j++; }
-        else { box.append(h('div', { class: 'del' }, '- ' + a[i])); i++; }
+    // ---- reviewing what changed since an answer -------------------------- //
+
+    // In the popup, not on the page: the difference can be longer than the plan
+    // is worth scrolling past, and an answer should pass through it. A <dialog>
+    // outside `main`, which render() replaces whenever the file changes.
+    const review = { el: document.getElementById('review'), seen: '', changed: false, answered: false, acted: false };
+    const LAYOUT_KEY = 'planning-review-layout';
+    function reviewLayout() {
+      try { return localStorage.getItem(LAYOUT_KEY) === 'sides' ? 'sides' : 'inline'; } catch (e) { return 'inline'; }
+    }
+    function setReviewLayout(value) {
+      try { localStorage.setItem(LAYOUT_KEY, value); } catch (e) { /* private window */ }
+      drawReview();
+    }
+    function isOpenStep(s) { return s && s.state !== 'done' && s.state !== 'dropped'; }
+    function allSteps(v) { return (v.data.phase || []).flatMap(ph => ph.step || []); }
+    function staleSteps(v) {
+      return allSteps(v).filter(s => s.gate && isOpenStep(s) && ((v.approvals || {})[s.id] || {}).status === 'stale');
+    }
+    function stalePlan(v) { return (v.plan_approval || {}).status === 'stale' ? v.plan_approval : null; }
+    function staleApproval(v, local) {
+      if (!v) return false;
+      if (!local) return Boolean(stalePlan(v));
+      return staleSteps(v).some(s => s.id === local);
+    }
+    // What the reader has in front of them: when this changes, the text did.
+    function reviewFingerprint(v) {
+      const pa = stalePlan(v);
+      return JSON.stringify([pa ? pa.current : '', staleSteps(v).map(s => [s.id, v.approvals[s.id].current])]);
+    }
+    function reviewButton() {
+      return h('div', { class: 'row' }, h('button', { class: 'primary', onclick: openReview }, 'Review changes'));
+    }
+    function openReview() {
+      review.seen = reviewFingerprint(view);
+      review.changed = false; review.answered = false; review.acted = false;
+      drawReview();
+      if (!review.el.open) review.el.showModal();
+      document.documentElement.classList.add('modal-open');
+      const body = review.el.querySelector('.review-body');
+      if (body) { body.scrollTop = 0; body.focus(); }
+    }
+    review.el.addEventListener('close', () => document.documentElement.classList.remove('modal-open'));
+    // A click on the backdrop lands on the dialog itself.
+    review.el.addEventListener('click', e => { if (e.target === review.el) review.el.close(); });
+
+    const FIELD_NAMES = { title: 'Title', goal: 'Goal', details: 'Details', done_when: 'Done when', by: 'Who does it',
+                          gate: 'Gate', needs: 'Needs', state: 'State' };
+    function shortValue(x) {
+      if (x === null || x === undefined || x === '') return '(none)';
+      if (x === true) return 'yes';
+      if (x === false) return 'no';
+      return Array.isArray(x) ? (x.length ? x.join(', ') : '(none)') : String(x);
+    }
+    function proseChange(prose) {
+      const sides = reviewLayout() === 'sides';
+      const pane = (label, nodes) => h('div', { class: 'rv-pane' }, h('div', { class: 'rv-label' }, label), h('div', { class: 'rv-text' }, ...nodes));
+      const part = (kind, text) => kind === 'del' ? h('del', {}, text) : kind === 'add' ? h('ins', {}, text) : document.createTextNode(text);
+      if (prose.rewritten) {
+        return h('div', { class: 'rv-sides' + (sides ? ' two' : '') },
+          pane('Before', [h('del', {}, prose.old)]), pane('After', [h('ins', {}, prose.new)]));
       }
-      return h('details', { open: true }, h('summary', { class: 'small' }, 'What changed since your answer'), box);
+      if (!sides) return h('div', { class: 'rv-text' }, ...prose.runs.map(([k, x]) => part(k, x)));
+      return h('div', { class: 'rv-sides two' },
+        pane('Before', prose.runs.filter(([k]) => k !== 'add').map(([k, x]) => part(k, x))),
+        pane('After', prose.runs.filter(([k]) => k !== 'del').map(([k, x]) => part(k, x))));
+    }
+    function fieldChange(f) {
+      const name = FIELD_NAMES[f.field] || f.field;
+      if (f.prose) return h('div', { class: 'rv-field' }, h('div', { class: 'rv-name' }, name), proseChange(f.prose));
+      return h('div', { class: 'rv-field' }, h('div', { class: 'rv-name' }, name),
+        h('div', { class: 'rv-text' }, h('del', {}, shortValue(f.old)), ' → ', h('ins', {}, shortValue(f.new))));
+    }
+    // A whole step, for one that was added or removed, or when no earlier text was kept.
+    function wholeStep(s) {
+      const shown = ['details', 'done_when', 'by', 'gate', 'needs'].filter(k => s[k] !== undefined && s[k] !== null && !(k === 'gate' && !s[k]) && !(Array.isArray(s[k]) && !s[k].length));
+      return shown.map(k => h('div', { class: 'rv-field' }, h('div', { class: 'rv-name' }, FIELD_NAMES[k] || k), h('div', { class: 'rv-text' }, shortValue(s[k]))));
+    }
+    function stepHead(id, title, tags) {
+      return h('div', { class: 'rv-step-head' }, h('span', { class: 'id' }, id), h('span', { class: 'rv-step-title' }, title || ''), ...tags);
+    }
+    const STATUS_BADGE = { added: 'ok', removed: 'gate', moved: 'open' };
+    // One step's change. A gated step that waits for an answer is compared with
+    // that answer, and has its own row here, so it is read and answered once.
+    function stepChange(c, v) {
+      const a = staleSteps(v).some(s => s.id === c.id) ? v.approvals[c.id] : null;
+      const tags = [];
+      if (c.status === 'added' || c.status === 'removed') tags.push(badge(c.status, STATUS_BADGE[c.status]));
+      if (c.moved) tags.push(badge(c.from_phase ? `moved from ${c.from_phase}` : 'moved', 'open'));
+      if (a) tags.push(badge('gate', 'gate'));
+      const box = h('section', { class: 'rv-step' }, stepHead(c.id, c.title, tags));
+      if (c.step) box.append(...wholeStep(c.step));
+      const fields = a && a.changes && a.changes.available ? a.changes.fields : c.fields;
+      for (const f of fields || []) box.append(fieldChange(f));
+      if (a) box.append(stepAnswer(c.id, a));
+      return box;
+    }
+    function stepAnswer(id, a) {
+      const box = h('div', { class: 'rv-answer' }, h('div', { class: 'rv-name' }, `Your answer for this gate (you ${a.verdict} it at ${a.at})`));
+      if (a.changes && !a.changes.available) box.append(h('p', { class: 'small muted' }, a.changes.summary + '.'));
+      box.append(reviewRow(a, `approval/${view.id}/${id}`));
+      return box;
+    }
+    function reviewRow(a, path, label) {
+      const row = approveRow(a, path, label);
+      row.addEventListener('click', e => { if (e.target.closest('button')) { review.answered = true; review.acted = true; } });
+      return row;
+    }
+    function samePart(list, what) {
+      if (!list.length) return null;
+      return h('details', { class: 'rv-same' }, h('summary', {}, `${list.length} ${what}${list.length > 1 ? 's' : ''} did not change`),
+        h('ul', {}, list.map(x => h('li', {}, h('span', { class: 'id' }, x.id), ' ', x.title || ''))));
+    }
+    function planChanges(pa, v) {
+      const out = [];
+      const c = pa.changes || {};
+      if (!c.available) {
+        // Never as if nothing changed: the text as it is now, to answer on.
+        out.push(h('p', { class: 'rv-note' }, (c.summary || 'The difference is unavailable') + '. This is the text as it is now.'));
+        for (const ph of v.data.phase || []) {
+          out.push(h('h3', { class: 'rv-phase' }, ph.title || ph.id, ' ', h('span', { class: 'h-meta mono' }, ph.id)));
+          if (ph.goal) out.push(h('div', { class: 'rv-field' }, h('div', { class: 'rv-name' }, 'Goal'), h('div', { class: 'rv-text' }, ph.goal)));
+          for (const s of ph.step || []) out.push(h('section', { class: 'rv-step' }, stepHead(s.id, s.title, []), ...wholeStep(s)));
+        }
+        return out;
+      }
+      if (!c.count) out.push(h('p', { class: 'rv-note' }, 'No field differs from what you answered on. Answer again to record it.'));
+      const same = [];
+      for (const ph of c.phases || []) {
+        if (ph.status === 'same') { same.push(...(ph.same_steps || [])); continue; }
+        const tags = [];
+        if (ph.status === 'added' || ph.status === 'removed') tags.push(badge(ph.status, STATUS_BADGE[ph.status]));
+        if (ph.moved) tags.push(badge('moved', 'open'));
+        out.push(h('h3', { class: 'rv-phase' }, ph.title || ph.id, ' ', h('span', { class: 'h-meta mono' }, ph.id), ' ', ...tags));
+        for (const f of ph.fields || []) out.push(fieldChange(f));
+        for (const s of ph.steps || []) out.push(stepChange(s, v));
+        const fold = samePart(ph.same_steps || [], 'step');
+        if (fold) out.push(fold);
+      }
+      const fold = samePart(same, 'other step');
+      if (fold) out.push(fold);
+      return out;
+    }
+    function drawReview() {
+      const v = view, pa = stalePlan(v), steps = staleSteps(v);
+      const now = reviewFingerprint(v);
+      // A change that follows the reader's own click is their answer, not a new text.
+      if (review.seen !== now) { review.changed = !review.acted; review.seen = now; }
+      review.acted = false;
+      const body = h('div', { class: 'review-body', tabindex: '-1' });
+      const old = review.el.querySelector('.review-body');
+      const top = old ? old.scrollTop : 0;
+      const hadFocus = old && old.contains(document.activeElement);
+      const layout = reviewLayout();
+      const choice = (value, label) => h('button', { type: 'button', class: layout === value ? 'on' : '', 'aria-pressed': String(layout === value), onclick: () => setReviewLayout(value) }, label);
+      const parts = [];
+      if (pa && pa.changes) parts.push(pa.changes.summary);
+      const inTree = new Set(pa && pa.changes && pa.changes.available ? pa.changes.phases.flatMap(ph => ph.steps.map(s => s.id)) : []);
+      const alone = steps.filter(s => !inTree.has(s.id));
+      if (!pa) for (const s of steps) parts.push(`${s.id}: ${v.approvals[s.id].changes.summary}`);
+      review.el.replaceChildren(
+        h('header', { class: 'review-head' },
+          h('div', { class: 'review-title' }, h('h2', { id: 'review-title' }, 'What changed'),
+            h('div', { class: 'small muted' }, parts.join(' · ') || v.data.title)),
+          h('div', { class: 'review-tools' },
+            h('div', { class: 'rv-switch', role: 'group', 'aria-label': 'How to show changed text' }, choice('inline', 'Inline'), choice('sides', 'Side by side')),
+            h('button', { type: 'button', class: 'rv-close', onclick: () => review.el.close() }, 'Close'))),
+        body);
+      if (review.changed && (pa || steps.length)) body.append(h('p', { class: 'rv-note', role: 'status' }, 'The plan changed while you were reading. This is the newest text.'));
+      if (!pa && !steps.length) {
+        body.append(h('p', { class: 'rv-note', role: 'status' }, review.answered
+          ? 'All answered. You can close this.'
+          : 'Nothing here waits for an answer any more: the text was changed back, or it was answered elsewhere.'));
+      }
+      // Gated steps the plan's comparison does not list: their own, each once.
+      for (const s of alone) body.append(stepChange({ id: s.id, title: s.title, fields: [] }, v));
+      if (pa) {
+        body.append(...planChanges(pa, v));
+        body.append(h('div', { class: 'rv-answer rv-foot' }, h('div', { class: 'rv-name' }, `Your answer for the plan as a whole (you ${pa.verdict} it at ${pa.at})`),
+          reviewRow(pa, 'approval/' + v.id, 'Approve plan')));
+      }
+      body.scrollTop = top;
+      if (hadFocus) body.focus();
     }
 
     function comments(on, openBox, alwaysOpen) {
@@ -1035,6 +1259,26 @@
       if (!alwaysOpen) wrap.append(h('button', { class: 'link', onclick: () => { box.hidden = !box.hidden; if (!box.hidden) ta.focus(); } }, list.length ? 'reply / comment' : 'comment'));
       wrap.append(box);
       return wrap;
+    }
+
+    // Where this plan is worked on. A worktree that is gone stays a choice until
+    // the user picks another: it is reported, never silently unassigned.
+    function worktreePicker(v) {
+      const at = v.worktree;
+      const names = v.worktrees.concat(at && at.gone ? [at.name] : []);
+      const choices = [{ value: '', text: 'anywhere', n: '' }]
+        .concat(names.map(name => ({ value: name, text: at && at.gone && name === at.name ? `${name} (gone)` : name, n: '' })));
+      return h('div', { class: 'worktree-pick' }, h('span', { class: 'kv' }, 'worktree: '),
+        picker('The worktree this plan is worked on in', choices, at ? at.name : '', async value => {
+          try {
+            const done = await api('PUT', `${base}/worktree/${v.id}`, { name: value || null });
+            if (done && done.warning) toast(done.warning);
+          } catch (e) { toast(e.message); }
+          load(true);
+        }),
+        at ? h('span', { class: 'path' + (at.gone ? ' muted' : '') }, at.path) : null,
+        at && at.gone ? badge('gone', 'warn') : null,
+        v.home ? h('span', { class: 'kv' }, ` the plan lives there, on ${v.home.branch || v.home.name}`) : null);
     }
 
     function renderBar(v, decisions, ans) {

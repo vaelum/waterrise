@@ -87,7 +87,11 @@ You talk to the user only through the plan file. So this is one long loop:
 1. Load the `planning` skill and run `waterrise guide`. Run every planning command as \
 `waterrise <command>` in the plan's repository (`plan_status` names it); in a butler \
 project pinned to a calendar version (v2026.x), `python butler.py planning <command>` is the same command. \
-Follow the guide and the repository's own rules throughout; this prompt changes none of them.
+Follow the guide and the repository's own rules throughout; this prompt changes none of them. \
+If `plan_status` names a worktree, do the work and commit the code there. `plan_status` also says where \
+the plan's file and its answers live: edit and commit them there, with `git -C <that checkout> commit -- <files>`, \
+and try again if git's index is locked. They are in the repository's main checkout unless it names another. \
+Protocols stay in the main checkout whatever you do.
 2. Call the `plan_status` tool with plan `{plan}`.
 3. If it says WORK, do all of it, in this order:
    - answers: act on each answered decision, then record `resolved`, `outcome`, `resolved_on`;

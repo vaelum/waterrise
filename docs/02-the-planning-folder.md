@@ -71,7 +71,44 @@ needs escaping:
 You, or your agent, write the items. The service writes `answers/<id>.json`
 when you click in the page: your picks, approvals, ticks, comments and the
 order of the cards. No two writers ever share a file, which is what lets an
-agent edit a plan while you answer it.
+agent edit a plan while you answer it. Two commands also write answers:
+`waterrise resolve` and `waterrise convert`. `waterrise assign` and the page's
+picker write `assignments.json`.
+
+## Worktrees
+
+All worktrees of a repository are one project with one page. A separate clone
+stays a separate project.
+
+Worktrees go in `worktrees/` at the top of the main checkout, which git ignores.
+`waterrise worktree add NAME` makes one, and it has `planning/` like any checkout.
+
+A plan tracked in the repository can live in a worktree, on its branch, so plan
+and code travel together. A plan assigned to a worktree (`waterrise assign ID NAME`,
+or the picker on its page) lives in that worktree's copy, if it has one. An item
+made there, or that exists only there, lives there too. Everything else lives in
+the main checkout. Commands, the page and `gate` read that one copy from anywhere,
+so an approval counts everywhere. Answers are written beside the plan, and you
+commit them on that branch with it. `waterrise show` says which copy counts, and
+`check` warns about edits to any other. A central project's plans stay in the
+central repository.
+
+Coming back is a merge. Once the branch is merged, `waterrise assign ID --none`
+makes the main checkout's copy count again; a plan that was only on the branch
+counts from there as soon as the merge brings it. `assign` warns if another copy
+that differs starts to count, because answers in the old one don't show until
+they are committed and merged. Commit a plan's answers before you assign it, and
+merge them into the branch. The assignment itself is in
+`planning/assignments.json` in the main checkout, so it never makes a merge
+conflict; commit it there like answers. Protocols stay in the main checkout, where removing a worktree can't
+delete them.
+
+For an assigned plan, `waterrise run` and `note` refuse in any other worktree, and
+warn in the main checkout, where closing work like a merge or a release happens.
+`gate` behaves the same everywhere. `worktree remove` refuses a worktree whose
+unmerged branch has the only current copy of a plan. Worktrees that other tools
+make elsewhere work too, but plans can't live in them or be assigned to them, and
+only `worktree list --all` shows them.
 
 ## Check
 

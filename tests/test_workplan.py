@@ -441,3 +441,45 @@ def test_the_server_speaks_utf8_whatever_the_code_page():
     out = subprocess.run([sys.executable, str(path)], input=msg.encode("utf-8"), capture_output=True,
                          env=env, timeout=30)
     assert json.loads(out.stdout.decode("utf-8")) == {"jsonrpc": "2.0", "id": 1, "result": {}}
+
+
+def _described(worktree: dict | None, home: str | None = None) -> str:
+    plan = workplan.Plan(repo=Path("/some/repo"), id="p-4k7x2m")
+    st = _status(folder="in-progress") | ({"worktree": worktree} if worktree else {}) | ({"home": home} if home else {})
+    return workplan.describe(plan, st, workplan.assess(st), None, "HEAD")
+
+
+def test_an_assigned_plan_that_lives_there_is_committed_there():
+    home = "/some/repo/worktrees/foo"
+    out = _described({"name": "foo", "path": home, "gone": False}, home)
+    assert f"Work in {home}" in out and f"git -C {home} commit" in out and "lives there" in out
+    assert str(Path(home)) in out.split("file: ")[1].splitlines()[0]
+
+
+def test_an_assigned_plan_without_a_copy_there_is_committed_in_the_main_checkout():
+    out = _described({"name": "foo", "path": "/some/repo/worktrees/foo", "gone": False}, "/some/repo")
+    assert "Work in /some/repo/worktrees/foo" in out and "no copy" in out
+    assert "git -C " + str(Path("/some/repo")) + " commit" in out
+    assert "file: planning/" in out
+
+
+def test_a_plan_only_on_a_branch_says_where_it_lives():
+    home = "/some/repo/worktrees/foo"
+    out = _described(None, home)
+    assert f"lives in {home}" in out and f"git -C {home} commit" in out
+
+
+def test_an_unassigned_plan_names_no_worktree():
+    assert "worktree" not in _described(None)
+
+
+def test_a_plan_whose_worktree_is_gone_says_so():
+    out = _described({"name": "foo", "path": "/some/repo/worktrees/foo", "gone": True})
+    assert "no longer exists" in out and "Work in" not in out
+    assert "waterrise assign p-4k7x2m" in out
+
+
+def test_the_prompt_says_where_plan_changes_are_committed():
+    from waterrise.mcp.server import prompt_text
+    text = prompt_text("p-4k7x2m")
+    assert "main checkout" in text and "git -C <that checkout> commit" in text and "Protocols" in text

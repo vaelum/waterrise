@@ -23,6 +23,7 @@ planning/
   notes/          context several items share; `state` in the file: draft or finished
   reports/        HTML reports and their sidecars (`<name>.toml` + `<name>.html`); `state` as notes
   answers/        <id>.json: the user's answers and approvals — never yours to write
+  assignments.json which worktree each plan belongs to (`waterrise assign`) — never yours to write
   protocols/      <plan id>/<step>.md: what was noted and run for each step; never committed
   .schema/        the JSON Schema editors validate against (`waterrise schema`)
   .gitignore      keeps the answers' lock files and protocols/ out of git (`waterrise init` writes it)
@@ -39,8 +40,8 @@ planning/
   hang on it, which is why a move or a rename breaks nothing.
 - **Two writers, never the same file.** You write the item. The planning
   service writes `answers/<id>.json` when the user clicks in the page. The only
-  commands of yours that touch an answers file are `waterrise resolve` and
-  `waterrise convert`.
+  commands of yours that touch an answers file are `waterrise resolve`,
+  `waterrise convert` and `waterrise assign`, which writes `assignments.json`.
 - Markdown plans and the old HTML forms are shown read-only and reported by
   `check` as warnings. `waterrise convert <file>` makes a typed skeleton.
 
@@ -147,7 +148,7 @@ steps. The user approves the plan as a whole before it leaves `draft/` (when
 | **Decide** | a draft with open decisions | picks an option or writes an own answer | write the decisions (section 4), run `serve`, give the URL; act on answers, record them |
 | **Extend** | any time | comments on the item, a section, a phase, a decision, a step or a finding | read comments in `status`, change the item, then `waterrise resolve <id> <c…> --note "what you did"`; when something new comes up mid-work, add a decision and put it in the `needs` of the steps it holds up |
 | **Track** | todo and in-progress | watches progress live; ticks their own steps | set `state = "active"` when you start a step and `"done"` with `commit` when it is, append a `[[log]]` entry, `waterrise move` the item, `waterrise check` after every edit |
-| **Gate** | before a gated step; before a plan leaves draft | approves or disapproves, with a note; sees what changed since an earlier answer | run `waterrise gate` right before the action (section 7) |
+| **Gate** | before a gated step; before a plan leaves draft | approves or disapproves, with a note; a change since an earlier answer is reviewed and answered in a popup | run `waterrise gate` right before the action (section 7) |
 
 A user step the user ticked in the page shows as "done in the page, not yet in
 the file" until you set its `state = "done"`.
@@ -179,6 +180,11 @@ forgot to set to `done` never shows. `waterrise status` prints the same list.
 - Exit 1 means not answered, disapproved (with the user's note), or stale.
   **Stop** and tell the user; give them the URL from `waterrise serve`. Never
   work around a closed gate.
+- When the text changed after the user's answer, the page shows one line and
+  **Review changes**, and the user reads the change and answers again in a popup,
+  by phase, step and word. Each stale approval is answered on its own; there is no
+  Approve all. It never opens by itself. An answer given on text that has changed
+  since it was drawn is refused, so the user sees your edit before approving it.
 - An approval covers the step's text: every field but `state`, `commit` and
   `reason`. Editing a gated step after its approval makes the approval stale.
   Record progress on it in the `[[log]]`, not in the step.
@@ -225,7 +231,74 @@ The protocol is the detail; the `[[log]]` entry stays the summary. Values in
 that print credentials. On Windows, `run` starts the command as given: a shell
 built-in needs `-- cmd /c ...` or `-- powershell -Command ...`.
 
-## 9. Commands
+## 9. Worktrees
+
+All worktrees of a repository are **one project with one page**, rooted at the
+main checkout. Every command, run in any worktree, reaches that project, whether
+it was started directly, through butler or by the MCP server. A plan tracked in
+the repository can live in a worktree, on its branch. A separate clone is a
+separate project. A bare repository has no main checkout, so each of its worktrees
+stays its own project. A central project's plans stay in the central repository,
+and all its worktrees read them there.
+
+- **The convention:** worktrees go in `worktrees/` at the top of the main
+  checkout. `waterrise worktree add NAME [--branch B] [--from REF] [--plan ID]`
+  makes one on a branch named NAME (the existing one if there is one, otherwise
+  new from the main checkout's HEAD), and has git ignore the folder: in the top
+  `.gitignore`, left uncommitted and said so, or in `.git/info/exclude` for a
+  central project.
+- **Where a plan lives.** Every worktree checks out a copy of every plan, and one
+  rule says which copy counts, wherever a command runs: a plan assigned to a
+  worktree that has a copy lives there; otherwise a plan in the main checkout lives
+  there; and an item that exists only in a worktree under `worktrees/` lives there,
+  in the first by name if in several. `show` says which. `waterrise new` run in such
+  a worktree makes the item there.
+- **Its file and its answers are together, in its home.** Edit the plan there and
+  commit both there, with the code: `git -C <its checkout> commit -- <files>`. The
+  page writes answers there too, uncommitted like any other answers, and `gate`
+  reads them there from anywhere. `plan_status` and `show` name the checkout. Try
+  again if git's index is locked.
+- **Its protocols stay in the main checkout,** wherever it lives. They are not
+  committed, and `git worktree remove` would delete them from a worktree.
+- **Coming back is a merge.** Once the branch is merged, `waterrise assign ID --none`
+  makes the main checkout's copy count again. A plan that was only on the branch
+  counts from the main checkout as soon as the merge brings it there. `assign` warns
+  when another copy starts to count that differs, because answers given in the old
+  one do not show until they are committed and merged: so when assigning a plan
+  that has uncommitted answers, commit them first, and merge them into the branch.
+  A conflict in an answers file is resolved like any other, keeping both sides'
+  entries.
+- **A copy of a plan that lives elsewhere** is read by nobody. `check`, run in a
+  worktree, warns about edits to it and names the file to edit. Editing a plan in
+  its home is normal and says nothing.
+- **Assigning:** a plan belongs to one worktree or to none, and a worktree can
+  hold several plans. `waterrise assign ID NAME` and `waterrise assign ID --none`
+  change it, as the user can in the page. NAME is `main` for the main checkout,
+  or a folder under `worktrees/`. It is kept in `planning/assignments.json` in the
+  main checkout, which branches do not change, so it never makes a merge conflict.
+  Commit it there like answers, or a clone will not have it;
+  like `answers/`, it is never yours to edit by hand. `status`, `show` and the MCP
+  tools give the name and the path; `list items --worktree NAME` filters by it. An
+  assignment does not touch an approval.
+- **Where you work on an assigned plan:** `run` and `note` go on in the assigned
+  worktree, warn and go on in the main checkout, which has legitimate closing work
+  such as merging and releasing, and stop in any other worktree, naming the right
+  path. `gate`'s exit status does not depend on where it runs; it only adds a line
+  saying so. Reading commands never refuse.
+- **A worktree that is gone** is never silently unassigned. Its plan is read from
+  the main checkout again. `check` warns while the plan is not in `done/`, the page
+  and `status` say so, and nothing is stopped because of it. In `done/` it is normal,
+  and the record stays.
+- **Worktrees elsewhere,** made by other tools, resolve to the project as well,
+  and commands work from them. Plans cannot live in them or be assigned to them, and
+  only `worktree list --all` shows them. `check` never warns about where they are,
+  only about edits to their copy when it runs inside one.
+- `waterrise worktree remove NAME` runs `git worktree remove`: it refuses a dirty
+  worktree, one holding a plan in `todo/` or `in-progress/`, and one whose branch,
+  not merged, has the only current copy of a plan. It never forces, and the branch
+  stays.
+
+## 10. Commands
 
 | command | does |
 |---|---|
@@ -234,11 +307,15 @@ built-in needs `-- cmd /c ...` or `-- powershell -Command ...`.
 | `waterrise new KIND NAME` | a new item with a fresh id |
 | `waterrise check [--strict] [--json]` | validate the whole folder; exit 1 on an error |
 | `waterrise status [ID] [--json]` | what waits on the user and on you |
-| `waterrise list [items\|decisions\|steps\|approvals\|comments\|findings] [--all] [--by agent\|user] [--everywhere] [--json]` | one line each; open ones unless `--all` |
+| `waterrise list [items\|decisions\|steps\|approvals\|comments\|findings] [--all] [--by agent\|user] [--everywhere] [--worktree NAME] [--json]` | one line each; open ones unless `--all` |
 | `waterrise show ID` | an item as text |
 | `waterrise move ID FOLDER` | move it, after checking the folder's rules |
 | `waterrise gate ID [STEP]` | exit 0 only if approved and unchanged |
 | `waterrise resolve ID COMMENT --note TEXT` | mark a comment handled |
+| `waterrise assign ID NAME\|--none` | assign a plan to a worktree, or to none |
+| `waterrise worktree add NAME [--branch B] [--from REF] [--plan ID]` | a worktree in `worktrees/` |
+| `waterrise worktree list [--all] [--json]` | name, branch, clean or not, ahead/behind, path and plans |
+| `waterrise worktree remove NAME` | `git worktree remove`; refused if dirty, holding an open plan, or the only home of an unmerged one |
 | `waterrise note ID STEP TEXT` | a dated note in the step's protocol (TEXT from stdin if none) |
 | `waterrise run ID STEP -- COMMAND ...` | run a command, its output into the step's protocol and the terminal |
 | `waterrise convert FILE` | a skeleton from a Markdown plan or an old HTML form |
@@ -263,7 +340,7 @@ central project, waterrise commits the folder in the central repository after
 every command that writes it, `check` included, and after every click in the
 page; you commit nothing there yourself.
 
-## 10. Before handing a draft to the user
+## 11. Before handing a draft to the user
 
 - [ ] `waterrise check` passes.
 - [ ] Every decision has context, two to four options, a recommendation and a because.

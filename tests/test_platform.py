@@ -622,3 +622,40 @@ def test_a_remove_waits_out_a_reader_on_windows(tmp_path, monkeypatch):
     lock.remove(f)
     assert len(calls) == 3 and not f.exists()
     lock.remove(f)                                  # missing is fine
+
+
+# Children that use the user's terminal: pip prints into it, and the command of
+# `waterrise run` may read it. Everything else waterrise starts has no window.
+WITH_THE_TERMINAL = {("install.py", "pip_install"), ("protocol.py", "run")}
+
+
+def test_every_child_process_opens_no_window_on_windows():
+    # The service runs under pythonw.exe, with no console: each git it started
+    # opened a console window of its own, flashing on every page view (seen on
+    # a real Windows machine with 2026.10.7).
+    import ast
+    package = Path(install.__file__).resolve().parent
+    missing = []
+    for f in sorted(package.rglob("*.py")):
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        owner = {}
+        for fn in ast.walk(tree):
+            if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for n in ast.walk(fn):
+                    owner.setdefault(id(n), fn.name)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                    and node.func.attr in ("run", "Popen", "check_output", "call") \
+                    and getattr(node.func.value, "id", "") == "subprocess" \
+                    and not any(k.arg in (None, "creationflags") for k in node.keywords) \
+                    and (f.name, owner.get(id(node))) not in WITH_THE_TERMINAL:
+                missing.append(f"{f.name}:{node.lineno}")
+    assert missing == []
+
+
+def test_hidden_is_create_no_window_on_windows_only(monkeypatch):
+    from waterrise import proc
+    monkeypatch.setattr(proc, "WINDOWS", True)
+    assert proc.hidden() == {"creationflags": 0x08000000}
+    monkeypatch.setattr(proc, "WINDOWS", False)
+    assert proc.hidden() == {}
