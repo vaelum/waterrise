@@ -36,7 +36,8 @@ and is the same thing; below, `waterrise` stands for either.
 5. **Never write anything under `planning/answers/`,** and never call the
    planning service's API with `curl` or a script. Only the user's clicks write
    answers and approvals. The only exceptions are the commands
-   `waterrise resolve` (a comment handled) and `waterrise convert`.
+   `waterrise resolve` (a comment handled), `waterrise reply` (an answer under a
+   comment or a chat message) and `waterrise convert`.
    `waterrise assign` writes `planning/assignments.json`; never edit it by hand.
 6. **A step with `gate = true` runs only after
    `waterrise gate <id> <step>` exits 0,** run just before the action, with
@@ -57,8 +58,10 @@ and is the same thing; below, `waterrise` stands for either.
    in its home (`git -C <its checkout> commit -- <files>`); `show` says where, and
    protocols always stay in the main checkout. If `status` names a worktree for the
    plan, do the work in it; `run` and `note` refuse in any other worktree. New
-   worktrees go in `worktrees/`, with `waterrise worktree add NAME`. A central
-   project's plans stay central.
+   worktrees go in the project's worktree folder (`worktrees/` unless its
+   planning.toml or `waterrise projects worktrees` says otherwise; `worktree list`
+   names it), with `waterrise worktree add NAME`. A central project's plans stay
+   central.
 10. If `waterrise` is not installed, say so and give the install command
    (`git clone https://github.com/vaelum/waterrise.git && cd waterrise &&
    python3 -m waterrise install`); install it only when asked. A butler
@@ -79,8 +82,9 @@ and is the same thing; below, `waterrise` stands for either.
 | `move ID FOLDER` | move it, after checking the target folder's rules |
 | `gate ID [STEP]` | exit 0 only on the user's current approval |
 | `resolve ID COMMENT --note TEXT` | mark the user's comment handled |
+| `reply ID COMMENT TEXT` | answer a comment or a chat message, without marking it handled |
 | `assign ID NAME\|--none` | a plan's worktree, or none |
-| `worktree add\|list\|remove` | the project's worktrees, in `worktrees/` |
+| `worktree add\|list\|remove` | the project's worktrees, in its worktree folder |
 | `note ID STEP TEXT` | a dated note in the step's protocol |
 | `run ID STEP -- COMMAND ...` | a command, its output into the step's protocol |
 | `convert FILE` | a typed skeleton from a Markdown plan or an old HTML form |
@@ -93,7 +97,7 @@ and is the same thing; below, `waterrise` stands for either.
 | mode | the user, in the page | you |
 |---|---|---|
 | **Decide** | picks an option or writes an own answer | write the decisions, `serve`, give the URL; act on the answers, then record `resolved`, `outcome`, `resolved_on` |
-| **Extend** | comments on any part | read comments in `status`, change the item, `waterrise resolve` each |
+| **Extend** | comments on any part, or writes in a plan's chat | read comments in `status`; answer a chat message with `waterrise reply`; change the item, `waterrise resolve` each |
 | **Track** | watches, ticks their own steps | set `state` (`active`, then `done` with `commit`), append `[[log]]`, `waterrise check` |
 | **Gate** | approves or disapproves a step, or a plan leaving `draft/` | `waterrise gate` right before the action; stop on a closed gate |
 

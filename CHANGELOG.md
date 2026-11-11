@@ -7,6 +7,53 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.11.2]
+
+### Added
+
+- **A project chooses its worktree folder.** `worktrees = ".worktrees"` in
+  `planning.toml`, relative to the main checkout and allowed to go up
+  (`../proj-wt`); `worktrees/` stays the default. A machine can override it with
+  `waterrise projects worktrees [SLUG|PATH] DIR`, and `--default` drops that.
+  Everything that named `worktrees/` follows it: `worktree add`, `list`, `remove`,
+  `assign`, where a plan lives, the ignore rule (written only for a folder inside
+  the checkout), `check`, the page and the MCP tools. `worktree list`, `status` and
+  the page say which folder is used and where it is set.
+- **`tools/bench.py`** measures the commands and the page on a large synthetic
+  project, and counts the git processes each starts.
+- **Pause and Continue on a plan's page.** Paused, `status` says so and the MCP
+  tools say PAUSED: the agent finishes the step it is on and waits;
+  `wait_for_plan` returns CONTINUED when the plan is continued.
+- **Progress beside a plan:** each phase with done/total and a bar, its steps
+  with their state, each a link. At phone width the side panel comes first.
+- **A plan's timeline:** its `[[log]]` and every step's protocol notes, newest
+  first. The step being worked on has its protocol open, following its newest
+  line.
+- **A chat beside every plan**, built on its whole-plan comments, and
+  `waterrise reply` for the agent's answers. A comment that has a reply waits on
+  the user rather than the agent.
+- **`/work-plan` can use several agents:** independent ready steps without a
+  gate go to subagents; the agent you started stays the only writer of the plan.
+
+### Changed
+
+- **Much faster with many worktrees.** A plan's copies in worktrees that are
+  byte-identical are parsed once: on a project with 100 plans and 40 worktrees,
+  `status` went from 18 s to under a second.
+- **`check` starts two git processes for HEAD, not one per item,** and finds the
+  line of a problem from one index per item. It also finds committed plans whose
+  names git quotes (non-ASCII), which it missed before.
+- **Worktree state** takes the main checkout's HEAD from `git worktree list` and
+  asks the worktrees a few at a time. A worktree whose git does not answer in time
+  shows as unknown; it showed as clean on the page and dirty in `worktree list`.
+- **The service keeps a page's folder read, its check and protocol scans in
+  memory** while nothing behind them changes, and asks git afresh on every request.
+  Its change streams walk the planning folders once per tick with `scandir`, shared
+  by every open stream. An index page's own stream no longer reacts to protocols
+  growing.
+- The service's API level is 2 (`PUT /api/repos/<slug>/worktrees`); a newer
+  command replaces an older running service, as before.
+
 ## [2026.11.1]
 
 ### Added

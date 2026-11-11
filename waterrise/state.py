@@ -310,7 +310,15 @@ class Summary:
                 "for_user": [dict(zip(("what", "local", "text"), x)) for x in self.for_user],
                 "for_agent": [dict(zip(("what", "local", "text"), x)) for x in self.for_agent],
                 "next": self.next_step.get("id") if self.next_step else None,
-                "open": self.open_steps}
+                "open": self.open_steps,
+                "paused": paused(self.answers)}
+
+
+def paused(ans: dict) -> dict | None:
+    """Who paused the plan in its page, and when; None while it may be worked
+    (p-pw7ft8 s6-1). The agent finishes the step it is on, then waits."""
+    p = ans.get("paused")
+    return p if isinstance(p, dict) and p.get("at") else None
 
 
 def plan_approval_due(item: Item, ans: dict, required: bool) -> bool:
@@ -379,7 +387,9 @@ def summarize(item: Item, ans: dict, *, plan_approval_required: bool = True,
                                                     "look again (the agent is not blocked)"))
 
     for c in ans.get("comments", []):
-        if not c.get("resolved"):
+        # Answered (`waterrise reply`) or handled (`resolve`): it waits on the
+        # user now, who writes again to go on (p-pw7ft8, decision `chat`).
+        if not c.get("resolved") and not c.get("replies"):
             s.for_agent.append(("comment", str(c.get("id", "")),
                                 (f"on {c['on']}: " if c.get("on") else "") + str(c.get("text", ""))))
 

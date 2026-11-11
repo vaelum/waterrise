@@ -7,13 +7,44 @@ from pathlib import Path
 import pytest
 
 from tests.test_planning import run
-from waterrise import answers, client, context, service
+from waterrise import answers, client, context, layout, service
 from waterrise import mcp as workplan
 
 
 def git(root: Path, *args: str, check: bool = True) -> str:
     return subprocess.run(["git", "-C", str(root), "-c", "user.name=t", "-c", "user.email=t@example.org", *args],
                           capture_output=True, text=True, check=check, encoding="utf-8").stdout
+
+
+# Every worktree test runs with the default folder, one inside the checkout and
+# one beside it (p-pw7ft8 s2-2); the ignore rule's own tests pin the default.
+WT_FOLDERS = ["worktrees", ".worktrees", "../wt"]
+
+
+@pytest.fixture(params=WT_FOLDERS, ids=["default", "inside", "beside"])
+def wt_folder(request):
+    return request.param
+
+
+def default_folder_only(fn):
+    return pytest.mark.parametrize("wt_folder", ["worktrees"])(fn)
+
+
+def set_folder(root: Path, value: str) -> None:
+    """The project's worktree folder in its planning.toml, and its ignore rule
+    where the default's is, as `init` would have written it."""
+    if value == "worktrees":
+        return
+    cfg = root / "planning" / "planning.toml"
+    cfg.write_text(cfg.read_text(encoding="utf-8") + f'worktrees = "{value}"\n', encoding="utf-8")
+    ignore = root / ".gitignore"
+    if ignore.exists() and "/worktrees/" in ignore.read_text(encoding="utf-8") and not value.startswith(".."):
+        ignore.write_text(ignore.read_text(encoding="utf-8") + f"/{value}/\n", encoding="utf-8")
+
+
+def wtf(root: Path) -> Path:
+    """The project's worktree folder, as waterrise reads it."""
+    return layout.setting(root).path
 
 
 @pytest.fixture
@@ -26,18 +57,19 @@ def env(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def proj(env):
+def proj(env, wt_folder):
     """A repository with a commit and a planning folder, and one linked worktree
-    in `worktrees/foo`."""
+    `foo` in its worktree folder."""
     root = (env / "proj").resolve()
     (root / "planning" / "todo").mkdir(parents=True)
     (root / "planning" / "planning.toml").write_text('format = 1\nuser = "u"\n', encoding="utf-8")
+    set_folder(root, wt_folder)
     (root / "sub").mkdir()
     (root / "sub" / "file").write_text("x\n", encoding="utf-8")
     git(root, "init", "-q")
     git(root, "add", ".")
     git(root, "commit", "-qm", "first")
-    git(root, "worktree", "add", "-q", "worktrees/foo", "-b", "foo")
+    git(root, "worktree", "add", "-q", str(wtf(root) / "foo"), "-b", "foo")
     return root
 
 
@@ -53,7 +85,7 @@ def entry(path: Path, **more) -> dict:
 
 def test_in_a_worktree_with_the_main_checkout_registered(proj):
     register(entry(proj))
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     ctx = context.resolve(wt)
     assert (ctx.root, ctx.planning, ctx.slug) == (proj, proj / "planning", "proj")
     assert ctx.checkout == wt
@@ -61,7 +93,7 @@ def test_in_a_worktree_with_the_main_checkout_registered(proj):
 
 def test_in_a_worktree_through_butler(proj, monkeypatch):
     register(entry(proj))
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     monkeypatch.setenv(context.PROJECT_ENV, str(wt))
     monkeypatch.setenv(context.PLANNING_ENV, "planning")
     monkeypatch.setenv(context.NAME_ENV, "demo")
@@ -71,7 +103,7 @@ def test_in_a_worktree_through_butler(proj, monkeypatch):
 
 
 def test_in_a_worktree_with_nothing_registered(proj):
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     ctx = context.resolve(wt / "sub")
     assert (ctx.root, ctx.planning, ctx.slug) == (proj, proj / "planning", None)
     assert ctx.checkout == wt
@@ -90,14 +122,14 @@ def test_in_a_worktree_beside_the_checkout(proj, env):
 def test_a_registered_project_inside_the_repository_is_found_from_a_worktree(proj):
     (proj / "sub" / "planning").mkdir()
     register(entry(proj), entry(proj / "sub"))
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     ctx = context.resolve(wt / "sub")
     assert (ctx.root, ctx.slug) == (proj / "sub", "sub")
     assert ctx.checkout == wt
 
 
 def test_a_folder_only_on_the_worktrees_branch_still_resolves(proj):
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     (wt / "new" / "deep").mkdir(parents=True)
     assert context.resolve(wt / "new" / "deep").root == proj
 
@@ -106,7 +138,7 @@ def test_the_main_checkout_is_its_own_checkout(proj):
     ctx = context.resolve(proj / "sub")
     assert (ctx.root, ctx.checkout) == (proj, proj)
     assert not context.locate(proj).linked
-    assert context.locate(proj / "worktrees" / "foo").linked
+    assert context.locate(wtf(proj) / "foo").linked
 
 
 def test_a_clone_stays_a_separate_project(proj, env):
@@ -136,14 +168,14 @@ def test_a_folder_outside_git_is_its_own_project(env):
 
 def test_a_central_project_is_found_from_a_worktree(proj, env):
     home = env / "data" / "waterrise" / "plans" / "proj" / "planning"
+    wt = wtf(proj) / "foo"          # before: a central project's setting is in its central planning.toml
     register(entry(proj) | {"home": "central", "planning": str(home)})
-    wt = proj / "worktrees" / "foo"
     ctx = context.resolve(wt)
     assert (ctx.root, ctx.planning, ctx.home, ctx.checkout) == (proj, home, "central", wt)
 
 
 def test_the_mcp_server_counts_a_worktree_as_its_project(proj):
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     (proj / "planning" / "todo" / "a.toml").write_text('id = "p-aaaaaa"\n', encoding="utf-8")
     (wt / "planning" / "todo").mkdir(parents=True, exist_ok=True)
     stale = wt / "planning" / "todo" / "a.toml"
@@ -163,7 +195,7 @@ def registry_at(state: Path, *entries: dict) -> service.Registry:
 
 def test_registering_from_a_worktree_joins_the_main_entry(proj, env):
     reg = registry_at(env / "s")
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     first = reg.register(str(wt), str(wt / "planning"), "proj")
     assert (first["path"], first["planning"]) == (str(proj), str(proj / "planning"))
     assert reg.register(str(proj), str(proj / "planning"), "proj")["slug"] == first["slug"]
@@ -172,7 +204,7 @@ def test_registering_from_a_worktree_joins_the_main_entry(proj, env):
 
 
 def test_an_old_worktree_entry_goes_at_start_if_its_main_is_registered(proj, env, capsys):
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     (env / "s").mkdir()
     (env / "s" / "registry.json").write_text(json.dumps({"repos": [
         entry(proj), entry(wt) | {"slug": "proj-foo"}]}), encoding="utf-8")
@@ -185,7 +217,7 @@ def test_an_old_worktree_entry_goes_at_start_if_its_main_is_registered(proj, env
 
 
 def test_an_old_worktree_entry_becomes_the_main_entry_if_that_is_missing(proj, env):
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     sib = env / "sib"
     git(proj, "worktree", "add", "-q", str(sib), "-b", "sib")
     reg = registry_at(env / "s", entry(wt) | {"slug": "foo"}, entry(sib.resolve()) | {"slug": "sib"})
@@ -195,7 +227,7 @@ def test_an_old_worktree_entry_becomes_the_main_entry_if_that_is_missing(proj, e
 
 
 def test_a_worktrees_central_entry_is_kept_where_its_plans_are(proj, env):
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     central = {"home": "central", "planning": str(env / "c" / "planning"), "slug": "foo"}
     reg = registry_at(env / "s", entry(proj), entry(wt) | central)
     assert "plans in its own central home" in reg.collapse_worktrees()[0]
@@ -215,9 +247,9 @@ def edit_copy(wt: Path) -> None:
         f.write("# edited\n")
 
 
-@pytest.mark.parametrize("where", ["worktrees/foo", "../sib"])
+@pytest.mark.parametrize("where", ["foo", "../sib"])
 def test_check_in_a_worktree_names_an_edited_copy_and_the_right_folder(proj, where, capsys):
-    wt = (proj / where).resolve()
+    wt = wtf(proj) / "foo" if where == "foo" else (proj / where).resolve()
     if not wt.exists():
         git(proj, "worktree", "add", "-q", str(wt), "-b", "sib")
     assert run(wt, "check") == 0
@@ -230,7 +262,7 @@ def test_check_in_a_worktree_names_an_edited_copy_and_the_right_folder(proj, whe
 
 
 def test_check_names_what_commits_on_the_branch_changed(proj, capsys):
-    wt = proj / "worktrees" / "foo"
+    wt = wtf(proj) / "foo"
     edit_copy(wt)
     git(wt, "commit", "-qam", "in the copy")
     capsys.readouterr()
@@ -239,7 +271,7 @@ def test_check_names_what_commits_on_the_branch_changed(proj, capsys):
 
 
 def test_check_elsewhere_says_nothing_about_other_worktrees(proj, capsys):
-    edit_copy(proj / "worktrees" / "foo")
+    edit_copy(wtf(proj) / "foo")
     assert run(proj, "check") == 0
     assert "edit it there" not in capsys.readouterr().out
 
@@ -249,19 +281,20 @@ def test_the_main_checkout_moving_on_is_not_an_edit(proj, capsys):
     git(proj, "add", ".")
     git(proj, "commit", "-qm", "main moves on")
     capsys.readouterr()
-    run(proj / "worktrees" / "foo", "check")
+    run(wtf(proj) / "foo", "check")
     assert "edit it there" not in capsys.readouterr().out
 
 
 # ---- worktree add, list and remove ------------------------------------------------ #
 
 @pytest.fixture
-def repo(env):
+def repo(env, wt_folder):
     """A repository whose planning folder is tracked, and no worktree yet."""
     root = (env / "repo").resolve()
     root.mkdir()
     git(root, "init", "-q")
     assert run(root, "init") == 0
+    set_folder(root, wt_folder)
     (root / "code").write_text("x\n", encoding="utf-8")
     git(root, "add", ".")
     git(root, "commit", "-qm", "first")
@@ -274,7 +307,7 @@ def status(root: Path) -> str:
 
 def test_add_makes_a_clean_worktree_with_planning(repo):
     assert run(repo, "worktree", "add", "foo") == 0
-    wt = repo / "worktrees" / "foo"
+    wt = wtf(repo) / "foo"
     assert (wt / "code").exists() and (wt / "planning" / "planning.toml").exists()
     assert status(wt) == "" and status(repo) == ""
     assert git(wt, "branch", "--show-current").strip() == "foo"
@@ -282,7 +315,7 @@ def test_add_makes_a_clean_worktree_with_planning(repo):
 
 def test_a_commit_in_a_new_worktree_merges_with_every_planning_file_kept(repo):
     run(repo, "worktree", "add", "foo")
-    wt = repo / "worktrees" / "foo"
+    wt = wtf(repo) / "foo"
     (wt / "more").write_text("y\n", encoding="utf-8")
     git(wt, "add", "more")
     git(wt, "commit", "-qm", "more")
@@ -292,9 +325,9 @@ def test_a_commit_in_a_new_worktree_merges_with_every_planning_file_kept(repo):
 
 def test_add_from_inside_another_worktree_lands_in_the_main_checkout(repo):
     run(repo, "worktree", "add", "foo")
-    assert run(repo / "worktrees" / "foo", "worktree", "add", "bar") == 0
-    assert (repo / "worktrees" / "bar" / "code").exists()
-    assert not (repo / "worktrees" / "foo" / "worktrees").exists()
+    assert run(wtf(repo) / "foo", "worktree", "add", "bar") == 0
+    assert (wtf(repo) / "bar" / "code").exists()
+    assert not (wtf(repo) / "foo" / "worktrees").exists()
 
 
 def test_add_uses_an_existing_branch_and_from(repo):
@@ -304,27 +337,27 @@ def test_add_uses_an_existing_branch_and_from(repo):
     git(repo, "commit", "-qm", "later")
     git(repo, "branch", "side")
     assert run(repo, "worktree", "add", "a", "--branch", "side") == 0
-    assert git(repo / "worktrees" / "a", "branch", "--show-current").strip() == "side"
+    assert git(wtf(repo) / "a", "branch", "--show-current").strip() == "side"
     assert run(repo, "worktree", "add", "b", "--from", first) == 0
-    assert git(repo / "worktrees" / "b", "rev-parse", "HEAD").strip() == first
+    assert git(wtf(repo) / "b", "rev-parse", "HEAD").strip() == first
     assert run(repo, "worktree", "add", "c", "--branch", "side", "--from", first) == 1
 
 
 @pytest.mark.parametrize("name", ["main", "a/b", "a\\b", "..", "."])
 def test_add_refuses_a_bad_name(repo, name):
     assert run(repo, "worktree", "add", name) == 1
-    assert not (repo / "worktrees").exists() or not any((repo / "worktrees").iterdir())
+    assert not (wtf(repo)).exists() or not any((wtf(repo)).iterdir())
 
 
 def test_add_refuses_a_folder_that_exists(repo):
-    (repo / "worktrees" / "foo").mkdir(parents=True)
+    (wtf(repo) / "foo").mkdir(parents=True)
     assert run(repo, "worktree", "add", "foo") == 1
 
 
 def test_list_shows_the_convention_and_all_adds_the_others(repo, env, capsys):
     run(repo, "worktree", "add", "foo")
     git(repo, "worktree", "add", "-q", str(env / "elsewhere"), "-b", "elsewhere")
-    (repo / "worktrees" / "foo" / "dirt").write_text("d\n", encoding="utf-8")
+    (wtf(repo) / "foo" / "dirt").write_text("d\n", encoding="utf-8")
     capsys.readouterr()
     assert run(repo, "worktree", "list", "--json") == 0
     rows = json.loads(capsys.readouterr().out)
@@ -338,7 +371,7 @@ def test_list_shows_the_convention_and_all_adds_the_others(repo, env, capsys):
 
 def test_list_counts_ahead_and_behind(repo, capsys):
     run(repo, "worktree", "add", "foo")
-    wt = repo / "worktrees" / "foo"
+    wt = wtf(repo) / "foo"
     (wt / "a").write_text("a\n", encoding="utf-8")
     git(wt, "add", "a")
     git(wt, "commit", "-qm", "a")
@@ -350,7 +383,7 @@ def test_list_counts_ahead_and_behind(repo, capsys):
 
 def test_remove_keeps_the_branch_and_refuses_what_git_refuses(repo):
     run(repo, "worktree", "add", "foo")
-    wt = repo / "worktrees" / "foo"
+    wt = wtf(repo) / "foo"
     (wt / "dirt").write_text("d\n", encoding="utf-8")
     assert run(repo, "worktree", "remove", "foo") == 1
     assert wt.exists()
@@ -372,16 +405,18 @@ def test_remove_is_held_back_by_an_open_assigned_plan(repo, capsys):
     capsys.readouterr()
     assert run(repo, "worktree", "remove", "foo") == 1
     assert plan in capsys.readouterr().err
-    assert (repo / "worktrees" / "foo").exists()
+    assert (wtf(repo) / "foo").exists()
 
 
 # ---- the ignore rule ------------------------------------------------------------- #
 
+@default_folder_only
 def test_a_fresh_init_ignores_the_folder(repo):
     assert "/worktrees/" in (repo / ".gitignore").read_text(encoding="utf-8")
     git(repo, "check-ignore", "worktrees/x")
 
 
+@default_folder_only
 def test_add_writes_the_rule_in_an_existing_gitignore_and_leaves_it_uncommitted(repo, capsys):
     (repo / ".gitignore").write_text("*.log", encoding="utf-8")
     git(repo, "add", ".")
@@ -393,18 +428,20 @@ def test_add_writes_the_rule_in_an_existing_gitignore_and_leaves_it_uncommitted(
     assert status(repo) == " M .gitignore\n"
 
 
+@default_folder_only
 def test_a_broader_rule_is_enough(repo):
     (repo / ".gitignore").write_text("worktrees\n", encoding="utf-8")
     assert run(repo, "worktree", "add", "foo") == 0
     assert (repo / ".gitignore").read_text(encoding="utf-8") == "worktrees\n"
 
 
+@default_folder_only
 def test_check_warns_only_when_the_folder_exists_and_is_not_ignored(repo, capsys):
     (repo / ".gitignore").unlink()
     capsys.readouterr()
     run(repo, "check")
     assert "is not ignored" not in capsys.readouterr().out
-    (repo / "worktrees").mkdir()
+    (wtf(repo)).mkdir()
     run(repo, "check")
     assert "is not ignored" in capsys.readouterr().out
     (repo / ".gitignore").write_text("/worktrees/\n", encoding="utf-8")
@@ -452,7 +489,7 @@ def test_assign_reassign_and_unassign(planned):
     assert run(repo, "assign", plan, "foo") == 0
     entry = stored(repo, plan)["worktree"]
     assert entry["name"] == "foo" and entry["by"] == "command" and entry["at"]
-    assert run(repo / "worktrees" / "bar", "assign", plan, "bar") == 0
+    assert run(wtf(repo) / "bar", "assign", plan, "bar") == 0
     assert stored(repo, plan)["worktree"]["name"] == "bar"
     assert run(repo, "assign", plan, "main") == 0
     assert stored(repo, plan)["worktree"]["name"] == "main"
@@ -483,7 +520,7 @@ def test_add_with_a_plan_assigns_it(planned):
     assert run(repo, "worktree", "add", "baz", "--plan", plan) == 0
     assert stored(repo, plan)["worktree"]["name"] == "baz"
     assert run(repo, "worktree", "add", "qux", "--plan", "p-zzzzzz") != 0
-    assert not (repo / "worktrees" / "qux").exists()
+    assert not (wtf(repo) / "qux").exists()
 
 
 def test_an_assignment_does_not_touch_an_approval(planned):
@@ -498,7 +535,7 @@ def test_an_assignment_does_not_touch_an_approval(planned):
 def test_status_show_and_list_say_where_a_plan_belongs(planned, capsys):
     repo, plan = planned
     run(repo, "assign", plan, "foo")
-    foo = str(repo / "worktrees" / "foo")
+    foo = str(wtf(repo) / "foo")
     capsys.readouterr()
     run(repo, "status", plan)
     assert f"worktree: foo  {foo}" in capsys.readouterr().out
@@ -530,7 +567,7 @@ def test_status_in_a_worktree_says_where_and_puts_its_plans_first(planned, capsy
     other = next(i for i in ids if i != plan)
     run(repo, "assign", other, "foo")
     capsys.readouterr()
-    run(repo / "worktrees" / "foo", "status")
+    run(wtf(repo) / "foo", "status")
     out = capsys.readouterr().out
     assert out.startswith("in the worktree foo,") and str(repo) in out.splitlines()[0]
     assert out.index(other) < out.index(plan)
@@ -541,7 +578,7 @@ def test_status_in_a_worktree_says_where_and_puts_its_plans_first(planned, capsy
 def test_a_gone_worktree_is_reported_never_silently_unassigned(planned, capsys):
     repo, plan = planned
     run(repo, "assign", plan, "foo")
-    git(repo, "worktree", "remove", str(repo / "worktrees" / "foo"))
+    git(repo, "worktree", "remove", str(wtf(repo) / "foo"))
     capsys.readouterr()
     run(repo, "check")
     assert "no longer exists" in capsys.readouterr().out
@@ -555,7 +592,7 @@ def test_a_gone_worktree_is_reported_never_silently_unassigned(planned, capsys):
 def test_a_finished_plan_keeps_its_record_quietly(planned, capsys):
     repo, plan = planned
     run(repo, "assign", plan, "foo")
-    git(repo, "worktree", "remove", str(repo / "worktrees" / "foo"))
+    git(repo, "worktree", "remove", str(wtf(repo) / "foo"))
     path = next((repo / "planning" / "todo").glob("*.toml"))
     path.rename(repo / "planning" / "done" / path.name)
     capsys.readouterr()
@@ -589,8 +626,8 @@ def test_the_wrong_place(working, command, capsys):
     assert run(repo, "assign", plan, "foo") == 0
     capsys.readouterr()
     # another linked worktree: refused, with the right path
-    assert run(repo / "worktrees" / "bar", *argv) == 1
-    assert str(repo / "worktrees" / "foo") in capsys.readouterr().err
+    assert run(wtf(repo) / "bar", *argv) == 1
+    assert str(wtf(repo) / "foo") in capsys.readouterr().err
     assert protocol_text(repo, plan, step) == ""
     # the main checkout: a warning, and on
     assert run(repo, *argv) == 0
@@ -598,7 +635,7 @@ def test_the_wrong_place(working, command, capsys):
     assert "this is the main checkout" in captured.out + captured.err
     assert protocol_text(repo, plan, step) != ""
     # the assigned one: nothing said
-    assert run(repo / "worktrees" / "foo", *argv) == 0
+    assert run(wtf(repo) / "foo", *argv) == 0
     captured = capsys.readouterr()
     assert "assigned to" not in captured.out + captured.err
 
@@ -612,7 +649,7 @@ def test_a_worktree_outside_the_folder_is_refused_too(working, env, capsys):
 
 def test_an_unassigned_plan_can_be_worked_on_anywhere(working, capsys):
     repo, plan, step = working
-    assert run(repo / "worktrees" / "bar", "note", plan, step, "a") == 0
+    assert run(wtf(repo) / "bar", "note", plan, step, "a") == 0
     assert run(repo, "note", plan, step, "b") == 0
     captured = capsys.readouterr()
     assert "assigned to" not in captured.out + captured.err
@@ -622,7 +659,7 @@ def test_a_plan_assigned_to_main_stops_a_worktree_and_not_the_main_checkout(work
     repo, plan, step = working
     run(repo, "assign", plan, "main")
     capsys.readouterr()
-    assert run(repo / "worktrees" / "foo", "note", plan, step, "a") == 1
+    assert run(wtf(repo) / "foo", "note", plan, step, "a") == 1
     capsys.readouterr()
     assert run(repo, "note", plan, step, "b") == 0
     captured = capsys.readouterr()
@@ -632,9 +669,9 @@ def test_a_plan_assigned_to_main_stops_a_worktree_and_not_the_main_checkout(work
 def test_a_gone_worktree_stops_nobody(working, capsys):
     repo, plan, step = working
     run(repo, "assign", plan, "foo")
-    git(repo, "worktree", "remove", str(repo / "worktrees" / "foo"))
+    git(repo, "worktree", "remove", str(wtf(repo) / "foo"))
     capsys.readouterr()
-    assert run(repo / "worktrees" / "bar", "note", plan, step, "a") == 0
+    assert run(wtf(repo) / "bar", "note", plan, step, "a") == 0
     captured = capsys.readouterr()
     assert "no longer exists" in captured.out + captured.err
 
@@ -644,7 +681,7 @@ def test_gates_exit_status_does_not_depend_on_where_it_runs(working, assigned, c
     repo, plan, _ = working
     if assigned:
         run(repo, "assign", plan, "foo")
-    for where in (repo, repo / "worktrees" / "foo", repo / "worktrees" / "bar"):
+    for where in (repo, wtf(repo) / "foo", wtf(repo) / "bar"):
         capsys.readouterr()
         assert run(where, "gate", plan) == 1
         captured = capsys.readouterr()
@@ -655,7 +692,7 @@ def test_gates_exit_status_does_not_depend_on_where_it_runs(working, assigned, c
 def test_reading_commands_never_refuse(working, capsys):
     repo, plan, _ = working
     run(repo, "assign", plan, "foo")
-    bar = repo / "worktrees" / "bar"
+    bar = wtf(repo) / "bar"
     for argv in (["status", plan], ["show", plan], ["list"]):
         assert run(bar, *argv) == 0
     capsys.readouterr()
@@ -685,13 +722,13 @@ def page(planned, env):
 def test_the_repositorys_view_has_worktrees_and_assignments(page):
     repo, plan, port, slug = page
     run(repo, "assign", plan, "foo")
-    (repo / "worktrees" / "foo" / "dirt").write_text("d\n", encoding="utf-8")
+    (wtf(repo) / "foo" / "dirt").write_text("d\n", encoding="utf-8")
     _, view = client.call(port, "GET", f"/api/r/{slug}")
     trees = {w["name"]: w for w in view["worktrees"]}
     assert set(trees) == {"main", "foo", "bar"}
     assert trees["foo"]["clean"] is False and trees["bar"]["clean"] is True and trees["foo"]["plans"] == [plan]
     it = next(i for i in view["items"] if i["id"] == plan)
-    assert it["worktree"] == {"name": "foo", "path": str(repo / "worktrees" / "foo"), "gone": False}
+    assert it["worktree"] == {"name": "foo", "path": str(wtf(repo) / "foo"), "gone": False}
 
 
 def test_the_index_counts_worktrees_without_asking_git(page, monkeypatch):
@@ -707,7 +744,7 @@ def test_the_index_counts_worktrees_without_asking_git(page, monkeypatch):
 def test_a_gone_worktree_shows_as_gone_in_the_views(page):
     repo, plan, port, slug = page
     run(repo, "assign", plan, "foo")
-    git(repo, "worktree", "remove", str(repo / "worktrees" / "foo"))
+    git(repo, "worktree", "remove", str(wtf(repo) / "foo"))
     _, view = client.call(port, "GET", f"/api/r/{slug}")
     assert next(i for i in view["items"] if i["id"] == plan)["worktree"]["gone"] is True
     assert "foo" not in [w["name"] for w in view["worktrees"]]
@@ -757,7 +794,7 @@ def test_an_assignment_and_answers_on_the_branch_merge_without_a_conflict(repo, 
     run(repo, "assign", plan, "foo")
     git(repo, "add", "planning")
     git(repo, "commit", "-qm", "assigned")
-    wt = repo / "worktrees" / "foo"
+    wt = wtf(repo) / "foo"
     branch_answers = wt / "planning" / "answers" / f"{plan}.json"
     answers.update(branch_answers, plan, lambda d: d["comments"].append({"id": "c1", "on": "", "text": "hi", "at": "t"}))
     git(wt, "add", "planning")

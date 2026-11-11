@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import re
 import subprocess
+import threading
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import answers as answers_mod
 from .types import (ANSWERS_FOLDER, ASSIGNMENTS_FILE, CONFIG_FILE, NOTES_FOLDER, PROTOCOLS_FOLDER, REPORTS_FOLDER, SCHEMA_FOLDER,
-                    STATE_FOLDERS, WORKTREES_FOLDER, Problem, load, load_config)
+                    STATE_FOLDERS, Problem, load, load_config)
 from .proc import hidden
 
 _TOML_LINE = re.compile(r"\(at line (\d+), column (\d+)\)")
@@ -33,6 +34,11 @@ class Home:
     planning: Path
 
 
+_ID_AT = re.compile(r'^\s*id\s*=\s*"([^"]*)"')
+_KEY_RUN = re.compile(r"[\w-]*")
+_WORD = re.compile(r"\w")
+
+
 @dataclass
 class Item:
     path: Path
@@ -43,6 +49,7 @@ class Item:
     problems: list[Problem] = field(default_factory=list)
     parsed: bool = False
     home: Home | None = None      # the worktree it lives in; None for the main checkout
+    _lines: tuple[dict, dict] | None = field(default=None, repr=False, compare=False)
 
     @property
     def id(self) -> str:
@@ -117,19 +124,38 @@ class Item:
         names, or the line of its top-level key."""
         if problem.line:
             return problem.line
-        lines = self.text.splitlines()
-        if problem.local:
-            pat = re.compile(r'^\s*id\s*=\s*"' + re.escape(problem.local) + r'"')
-            for i, line in enumerate(lines, 1):
-                if pat.match(line):
-                    return i
+        ids, keys = self._line_index()
+        if problem.local and problem.local in ids:
+            return ids[problem.local]
         if problem.where:
-            key = re.split(r"[.\[]", problem.where)[0]
-            pat = re.compile(r"^\s*\[{0,2}" + re.escape(key) + r"\b")
-            for i, line in enumerate(lines, 1):
-                if pat.match(line):
-                    return i
+            return keys.get(re.split(r"[.\[]", problem.where)[0])
         return None
+
+    def _line_index(self) -> tuple[dict, dict]:
+        """The first line of each local id (`id = "…"`) and of each key a line
+        starts with, after up to two `[`: what `^\\s*id\\s*=\\s*"<id>"` and
+        `^\\s*\\[{0,2}<key>\\b` would find, built once per item rather than once
+        per problem (p-pw7ft8 s3-1). A key is indexed at every prefix of the
+        line's leading run of word characters and `-` that ends on a word
+        boundary, as `\\b` would match it."""
+        if self._lines is None:
+            ids: dict[str, int] = {}
+            keys: dict[str, int] = {}
+            for i, line in enumerate(self.text.splitlines(), 1):
+                m = _ID_AT.match(line)
+                if m:
+                    ids.setdefault(m.group(1), i)
+                s = line.lstrip()
+                s = s[2:] if s.startswith("[[") else s[1:] if s.startswith("[") else s
+                if "" not in keys and s and _WORD.match(s[0]):
+                    keys[""] = i                # an empty key: the first line with a word there
+                run = _KEY_RUN.match(s).group()
+                for n in range(1, len(run) + 1):
+                    after = s[n] if n < len(s) else ""
+                    if bool(_WORD.match(run[n - 1])) != bool(after and _WORD.match(after)):
+                        keys.setdefault(run[:n], i)
+            self._lines = (ids, keys)
+        return self._lines
 
 
 @dataclass
@@ -225,40 +251,70 @@ def _tracked(repo: Path, path: Path) -> bool:
         return False
 
 
-def _parse_item(path: Path, root: Path, folder: str) -> Item:
-    rel = path.relative_to(root).as_posix()
+# What a file's text parses to, keyed on the text: every worktree checks out a
+# copy of every plan, and most copies are byte-identical, so the same text is
+# parsed once per process (p-pw7ft8 s3-6). The key is the content itself, so an
+# entry cannot go stale; the cache is bounded by the size of its texts, so the
+# long-running service stays small. Items share the parsed data and problems,
+# which nothing changes after parsing.
+_PARSED: dict[str, tuple[dict, bool, tuple[Problem, ...]]] = {}
+_PARSED_LIMIT = 32 * 1024 * 1024        # characters of text kept as keys
+_parsed_size = 0
+_parsed_lock = threading.Lock()         # the service reads folders from several threads
+
+
+def _parse_text(text: str) -> tuple[dict, bool, tuple[Problem, ...]]:
+    global _parsed_size
+    hit = _PARSED.get(text)
+    if hit is not None:
+        return hit
+    try:
+        raw = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        msg = str(e)
+        m = _TOML_LINE.search(msg)
+        line = int(m.group(1)) if m else None
+        hint = ""
+        if "'''" in text:
+            hint = " (a prose field in ''' … ''' cannot itself contain three single quotes)"
+        out = ({}, False, (Problem("error", f"not valid TOML: {_TOML_LINE.sub('', msg).strip()}{hint}",
+                                   line=line),))
+    else:
+        loaded = load(raw)
+        out = (loaded.data, True, tuple(loaded.problems))
+    with _parsed_lock:
+        if text not in _PARSED:
+            while _PARSED and _parsed_size + len(text) > _PARSED_LIMIT:
+                old = next(iter(_PARSED))       # the oldest first
+                del _PARSED[old]
+                _parsed_size -= len(old)
+            _PARSED[text] = out
+            _parsed_size += len(text)
+    return out
+
+
+def _parse_item(path: Path, root: Path, folder: str, rel: str | None = None) -> Item:
+    rel = rel if rel is not None else path.relative_to(root).as_posix()
     it = Item(path=path, rel=rel, folder=folder)
     try:
         it.text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
         it.problems.append(Problem("error", f"cannot read: {e}"))
         return it
-    try:
-        raw = tomllib.loads(it.text)
-    except tomllib.TOMLDecodeError as e:
-        msg = str(e)
-        m = _TOML_LINE.search(msg)
-        line = int(m.group(1)) if m else None
-        hint = ""
-        if "'''" in it.text:
-            hint = " (a prose field in ''' … ''' cannot itself contain three single quotes)"
-        it.problems.append(Problem("error", f"not valid TOML: {_TOML_LINE.sub('', msg).strip()}{hint}",
-                                   line=line))
-        return it
-    loaded = load(raw)
-    it.data, it.parsed = loaded.data, True
-    it.problems.extend(loaded.problems)
+    it.data, it.parsed, problems = _parse_text(it.text)
+    it.problems.extend(problems)
     return it
 
 
 def worktree_homes(root: Path, repo: Path) -> list[Home]:
-    """The worktrees under `worktrees/` with a copy of the planning folder, by
-    name. No git: a linked worktree has a `.git` file. A folder that is not in
-    its repository's main checkout (a central project's) has none, nor does a
-    repository without the folder."""
+    """The worktrees in the project's worktree folder (layout.py) with a copy of
+    the planning folder, by name. No git: a linked worktree has a `.git` file. A
+    folder that is not in its repository's main checkout (a central project's)
+    has none, nor does a repository without the folder."""
+    from . import layout
     try:
         rel = root.relative_to(repo)
-        folders = sorted((repo / WORKTREES_FOLDER).iterdir())
+        folders = sorted(layout.setting(repo, root).path.iterdir())
     except (ValueError, OSError):
         return []
     return [Home(d.name, d, d / rel) for d in folders if (d / ".git").is_file() and (d / rel).is_dir()]
@@ -346,6 +402,7 @@ def _read_one(root: Path, repo: Path | None = None) -> Folder:
             f.config = {}
             f.config_problems = [Problem("error", f"{CONFIG_FILE} is not valid TOML: {e}")]
 
+    prefix = len(str(root)) + 1
     for entry in sorted(root.iterdir()):
         name = entry.name
         if name in (CONFIG_FILE, ASSIGNMENTS_FILE, "README.md", SCHEMA_FOLDER) or name.startswith("."):
@@ -360,9 +417,11 @@ def _read_one(root: Path, repo: Path | None = None) -> Folder:
             for p in sorted(entry.rglob("*")):
                 if not p.is_file() or p.name.startswith("."):
                     continue
-                rel = p.relative_to(root).as_posix()
+                # What rglob under `root` found starts with it: slicing is the
+                # same as relative_to, which is slow on many files (p-pw7ft8 s3-6).
+                rel = str(p)[prefix:].replace("\\", "/")
                 if p.suffix == ".toml":
-                    f.items.append(_parse_item(p, root, name))
+                    f.items.append(_parse_item(p, root, name, rel))
                 elif name == REPORTS_FOLDER:
                     # A report's document, and anything it ships beside it;
                     # check pairs them with their sidecars.

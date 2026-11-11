@@ -20,6 +20,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import layout
 from .context import prog, short
 from .folder import Folder, Item
 from .state import (DONE_STEP, decision_local, decision_state, plan_approval, satisfied,
@@ -202,29 +203,46 @@ _ID_LINE = re.compile(r'^id\s*=\s*"([^"]*)"', re.M)
 
 
 def _ids_at_head(folder: Folder) -> dict[str, str] | None:
-    """relative path (inside the planning folder) -> id, as committed at HEAD."""
+    """relative path (inside the planning folder) -> id, as committed at HEAD.
+    Two git processes however many items there are: `ls-tree` for the names and
+    one `cat-file --batch` for their contents (p-pw7ft8 s3-1)."""
     try:
         rel = folder.root.relative_to(folder.repo).as_posix()
     except ValueError:
         return None
     try:
-        names = subprocess.run(["git", "-C", str(folder.repo), "ls-tree", "-r", "--name-only", "HEAD",
-                                "--", rel], capture_output=True, text=True, timeout=10, encoding="utf-8",
-                                stdin=subprocess.DEVNULL, **hidden())
+        names = subprocess.run(["git", "-C", str(folder.repo), "ls-tree", "-r", "-z", "--name-only", "HEAD",
+                                "--", rel], capture_output=True, timeout=10,
+                               stdin=subprocess.DEVNULL, **hidden())
     except (OSError, subprocess.TimeoutExpired):
         return None
     if names.returncode != 0:
         return None
-    out = {}
-    for name in names.stdout.splitlines():
-        if not name.endswith(".toml") or name.endswith("/planning.toml") or name == "planning.toml":
-            continue
-        shown = subprocess.run(["git", "-C", str(folder.repo), "show", f"HEAD:{name}"],
-                               capture_output=True, text=True, timeout=10, encoding="utf-8",
-                               stdin=subprocess.DEVNULL, **hidden())
-        if shown.returncode != 0:
-            continue
-        m = _ID_LINE.search(shown.stdout)
+    wanted = [n for n in names.stdout.decode("utf-8", "surrogateescape").split("\0")
+              if n.endswith(".toml") and n != "planning.toml" and not n.endswith("/planning.toml") and "\n" not in n]
+    if not wanted:
+        return {}
+    query = "".join(f"HEAD:{n}\n" for n in wanted).encode("utf-8", "surrogateescape")
+    try:
+        shown = subprocess.run(["git", "-C", str(folder.repo), "cat-file", "--batch"], input=query,
+                               capture_output=True, timeout=30, **hidden())
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if shown.returncode != 0:
+        return None
+    out, data, pos = {}, shown.stdout, 0
+    for name in wanted:
+        end = data.find(b"\n", pos)
+        if end < 0:
+            break
+        header = data[pos:end].split()
+        pos = end + 1
+        if len(header) != 3 or header[1] != b"blob":
+            continue                    # "<name> missing", or not a file
+        size = int(header[2])
+        body = data[pos:pos + size].decode("utf-8", "replace")
+        pos += size + 1                 # the content, and the newline after it
+        m = _ID_LINE.search(body)
         if m:
             out[name[len(rel) + 1:] if rel != "." else name] = m.group(1)
     return out
@@ -326,6 +344,30 @@ def _check_report(report: Report, folder: Folder, item: Item, ids: dict[str, Ite
                                    "instead", line)
 
 
+# A protocol's scan, kept by its path, size and mtime: protocols only grow, and a
+# page asks for its check on every load, so the service reads each once rather
+# than on every request (p-pw7ft8 s3-3). Within one command it changes nothing.
+_SCANS: dict[Path, tuple[tuple, bool, tuple[int, ...]]] = {}
+
+
+def _protocol_scan(path: Path) -> tuple[bool, tuple[int, ...]]:
+    """(has a note, the lines of what looks like a credential)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return False, ()
+    stamp = (st.st_size, st.st_mtime_ns)
+    hit = _SCANS.get(path)
+    if hit is not None and hit[0] == stamp:
+        return hit[1], hit[2]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    found = (" note\n" in text, tuple(text.count("\n", 0, m.start()) + 1 for m in CREDENTIAL.finditer(text)))
+    if len(_SCANS) > 20000:
+        _SCANS.clear()
+    _SCANS[path] = (stamp, *found)
+    return found
+
+
 def _check_protocols(report: Report, folder: Folder, item: Item) -> None:
     """A warning for a done agent step with no protocol, or none with a note
     in it (enforce, amos 2026-10-24), and any credential in one. Protocols are
@@ -343,15 +385,13 @@ def _check_protocols(report: Report, folder: Folder, item: Item) -> None:
         if not path.is_file():
             report.add(item.rel, "warn", f"step {sid} is done, but has no protocol "
                                          f"({short()} note / {short()} run {item.id} {sid})", line)
-        elif " note\n" not in path.read_text(encoding="utf-8", errors="replace"):
+        elif not _protocol_scan(path)[0]:
             report.add(item.rel, "warn", f"step {sid} is done, but its protocol has no note: what was done, and why",
                        line)
     for path in sorted(base.glob("*.md")):
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for m in CREDENTIAL.finditer(text):
+        for n in _protocol_scan(path)[1]:
             report.add(path.relative_to(folder.root).as_posix(), "error",
-                       "has something that looks like a credential; remove it from the protocol",
-                       text.count("\n", 0, m.start()) + 1)
+                       "has something that looks like a credential; remove it from the protocol", n)
 
 
 def _check_item_content(report: Report, item: Item, ids: dict[str, Item], ans: dict, today) -> None:
@@ -557,11 +597,14 @@ def worktree_warnings(report: Report, root: Path, planning: Path, checkout: Path
         if it.parsed and it.kind == "plan" and it.id and it.folder != "done":
             at = worktrees.where(root, report.folder.assignment(it.id))
             if at and at["gone"]:
-                report.add(it.rel, "warn", f"assigned to the worktree {at['name']}, which no longer exists: "
-                                           f"`{short()} assign {it.id} <worktree>`, or `--none`")
-    if (root / worktrees.FOLDER).is_dir() and worktrees.ignored(root) is False:
-        report.add(f"{worktrees.FOLDER}/", "warn", "is not ignored by git, so it shows as untracked; "
-                                                   f"add {worktrees.IGNORE_RULE} to the top .gitignore")
+                report.add(it.rel, "warn", f"assigned to the worktree {at['name']}, which no longer exists in this "
+                                           f"project's worktree folder, {layout.where_set(worktrees.folder_of(root))}: "
+                                           f"`{short()} assign {it.id} <worktree>`, or `--none`; if the folder was "
+                                           "changed, `git worktree move` brings a worktree over")
+    wt = worktrees.folder_of(root)
+    if wt.inside and wt.path.is_dir() and worktrees.ignored(root) is False:
+        report.add(f"{wt.rel}/", "warn", "is not ignored by git, so it shows as untracked; "
+                                         f"add {worktrees.ignore_rule(root)} to the top .gitignore")
     if checkout is None or checkout == root:
         return
     try:
@@ -603,6 +646,8 @@ def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> R
     else:
         for p in folder.config_problems:
             report.add("planning.toml", p.level, str(p))
+        if "worktrees" in folder.config and (why := layout.invalid(folder.config["worktrees"])):
+            report.add("planning.toml", "error", f"worktrees {why}; the default, worktrees, is used meanwhile")
         if folder.config.get("format") not in (None, FORMAT) and not folder.config_problems:
             report.add("planning.toml", "error", f"format {folder.config.get('format')} is not one this "
                                                  f"waterrise knows (it knows {FORMAT})")

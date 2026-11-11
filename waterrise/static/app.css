@@ -239,7 +239,12 @@ body[data-view="repo"] h1 { font-size: clamp(2.5rem, 6vw, 4rem); line-height: 1;
 /* ---- one item ------------------------------------------------------------ */
 body[data-view="item"] main { display: flex; flex-wrap: wrap; gap: 48px; align-items: flex-start; }
 .article { flex: 1 1 520px; min-width: 0; max-width: 46rem; }
-.todo-aside { flex: 1 1 260px; max-width: 100%; position: sticky; top: 80px; }
+.todo-aside { flex: 1 1 260px; max-width: 100%; position: sticky; top: 80px;
+  max-height: calc(100vh - 160px); overflow-y: auto; overscroll-behavior: contain; }
+@media (max-width: 900px) {
+  /* Narrow: the panel comes first, above the plan, and scrolls with the page. */
+  .todo-aside { order: -1; position: static; max-height: none; overflow: visible; flex-basis: 100%; }
+}
 .kvs { font: 13px/1.6 var(--font-ui); color: var(--muted); }
 .kv { font: 13px/1.6 var(--font-ui); color: var(--muted); }
 .kv code { color: var(--fg); }
@@ -388,6 +393,8 @@ details.protocol > summary { cursor: pointer; color: var(--muted); }
 .wt-name { font: 600 14px/1.45 var(--font-mono); overflow-wrap: anywhere; }
 .wt-state, .wt-plans { overflow-wrap: anywhere; }
 .wt-path { grid-column: 1 / -1; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
+.wt-folder { padding: 10px 12px; border-top: 1px solid var(--border); font: 13px/1.45 var(--font-ui); overflow-wrap: anywhere; }
+.wt-folder .path { font-family: var(--font-mono); }
 .badge.worktree-chip { text-transform: none; font-family: var(--font-mono); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .worktree-pick { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
 .worktree-pick .path { font: 13px/1.45 var(--font-mono); color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
@@ -433,3 +440,72 @@ dialog.review::backdrop { background: rgb(0 0 0 / 0.55); }
   dialog.review { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
   .rv-sides.two { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Pause and Continue, at the top of a plan's side panel. */
+.pause-row { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap;
+  padding: 0 0 12px; margin: 0 0 12px; border-bottom: 1px solid var(--border); }
+.pause-row button { flex: none; }
+
+/* Progress beside the plan (p-pw7ft8 s7-1). */
+.prog { margin-top: 14px; border-top: 1px solid var(--border); padding-top: 4px; }
+.prog > summary { cursor: pointer; list-style: none; }
+.prog > summary::-webkit-details-marker { display: none; }
+.prog > summary h3 { display: inline; }
+.prog > summary::before { content: "▸ "; color: var(--muted); }
+.prog[open] > summary::before { content: "▾ "; }
+.prog-phase { border-top: 1px solid var(--border); padding: 6px 0; }
+.prog-phase > summary { cursor: pointer; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px;
+  align-items: baseline; list-style: none; }
+.prog-phase > summary::-webkit-details-marker { display: none; }
+.prog-title { overflow-wrap: anywhere; }
+.prog-phase.finished .prog-title { color: var(--muted); }
+.prog-bar { grid-column: 1 / -1; height: 4px; border-radius: 2px; background: var(--border); overflow: hidden; }
+.prog-bar > span { display: block; height: 100%; background: var(--accent); }
+.prog-phase.finished .prog-bar > span { background: var(--ok, var(--accent)); }
+.prog-steps { list-style: none; margin: 6px 0 2px; padding: 0; }
+.prog-step { display: flex; align-items: baseline; gap: 8px; padding: 3px 0; font-size: 13px; overflow-wrap: anywhere; }
+.prog-step a { color: var(--fg); text-decoration: none; min-width: 0; }
+.prog-step a:hover { color: var(--accent); }
+.prog-step.done a, .prog-step.dropped a { color: var(--muted); }
+.prog-step.dropped a { text-decoration: line-through; }
+.prog-dot { flex: none; width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid var(--muted); transform: translateY(1px); }
+.prog-step.done .prog-dot, .prog-step.ticked .prog-dot { background: var(--accent); border-color: var(--accent); }
+.prog-step.active .prog-dot { border-color: var(--accent); background: linear-gradient(90deg, var(--accent) 50%, transparent 50%); }
+.prog-step.blocked .prog-dot { border-color: var(--warn, #d9a441); background: var(--warn, #d9a441); }
+.prog-step.active a { font-weight: 600; }
+
+/* The plan's timeline, and the active step's protocol following (p-pw7ft8 s7-2). */
+.timeline { list-style: none; padding: 0; margin: 0 0 24px; border-left: 2px solid var(--border); }
+.tl-row { position: relative; padding: 6px 0 10px 16px; font: 14px/1.5 var(--font-ui); overflow-wrap: anywhere; }
+.tl-row::before { content: ""; position: absolute; left: -6px; top: 12px; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--bg); border: 2px solid var(--muted); }
+.tl-row.tl-log::before { border-color: var(--ok); background: var(--ok); }
+.tl-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-bottom: 2px; }
+.tl-head a { color: var(--accent); text-decoration: none; }
+.tl-row .prose p { margin: 0 0 .4em; }
+details.protocol.protocol-live > summary::after { content: " · following"; color: var(--accent); }
+.protocol-body.following { max-height: 24rem; overscroll-behavior: contain; }
+
+/* The chat beside a plan (p-pw7ft8 s7-3). */
+.chat { margin-top: 14px; padding-top: 4px; border-top: 1px solid var(--border); }
+.chat h3 { margin: 10px 0 8px; }
+.chat-log { display: flex; flex-direction: column; gap: 8px; max-height: 22rem; overflow-y: auto; overscroll-behavior: contain;
+  margin-bottom: 10px; padding-right: 2px; }
+.chat-msg { max-width: 92%; padding: 6px 10px; border-radius: 10px; font: 14px/1.45 var(--font-ui); overflow-wrap: anywhere; }
+.chat-msg .prose p { margin: 0 0 .3em; } .chat-msg .prose > :last-child { margin-bottom: 0; }
+.chat-msg.mine { align-self: flex-end; background: var(--accent-soft); border: 1px solid var(--accent); }
+.chat-msg.agent { align-self: flex-start; background: var(--surface-2); border: 1px solid var(--border); }
+.chat-msg.agent.done { border-color: var(--ok); background: var(--ok-soft); }
+.chat-meta { color: var(--muted); margin-bottom: 2px; }
+.chat-wait { align-self: flex-start; font-style: italic; }
+.chat textarea { width: 100%; resize: vertical; }
+.chat-send { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin-top: 6px; }
+.comment .reply { margin-top: 2px; }
+
+/* Pause on a plan's card in the lanes (amos, c2). */
+.card-pause { margin-left: 6px; min-width: 28px; height: 24px; padding: 0 6px; border-radius: 6px; line-height: 1;
+  font-size: 12px; color: var(--muted); }
+.card-pause:hover { color: var(--fg); }
+.card-pause.on { color: var(--warn); border-color: var(--warn); }
+.item-card.paused { border-color: var(--warn); }
+.pause-btn { white-space: nowrap; }

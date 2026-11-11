@@ -1,9 +1,10 @@
-"""A project's worktrees: `<main checkout>/worktrees/<name>` by convention.
+"""A project's worktrees: `<its worktree folder>/<name>`, `worktrees/` unless the
+project sets another (layout.py).
 
 Git knows every worktree of a repository; waterrise names and assigns only the
-main checkout (`main`) and the ones in the conventional folder. The others,
-which other tools make where they like, resolve to the project but are shown
-only on request and cannot be assigned.
+main checkout (`main`) and the ones in the project's worktree folder. The
+others, which other tools make where they like, resolve to the project but are
+shown only on request and cannot be assigned.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import answers as answers_mod
+from . import layout
 from .context import Project, _git, _main_checkout, prog
 from .errors import WaterriseError
 from .folder import Folder, Item
@@ -20,7 +22,18 @@ from .types import WORKTREES_FOLDER as FOLDER
 
 MAIN = "main"
 OPEN_FOLDERS = ("todo", "in-progress")
-IGNORE_RULE = f"/{FOLDER}/"
+IGNORE_RULE = f"/{FOLDER}/"     # the default's; ignore_rule(root) gives a project's
+
+
+def folder_of(root: Path) -> layout.Setting:
+    """The project's worktree folder, and where it is set."""
+    return layout.setting(root)
+
+
+def ignore_rule(root: Path) -> str | None:
+    """The line for the top .gitignore; None for a folder outside the checkout."""
+    s = folder_of(root)
+    return f"/{s.rel}/" if s.inside else None
 
 
 @dataclass
@@ -40,6 +53,7 @@ class Worktree:
 def read(root: Path) -> list[Worktree]:
     """Every worktree of the repository whose folder exists, the main one first."""
     out = _git(root, "worktree", "list", "--porcelain")
+    folder = folder_of(root).path
     found: list[Worktree] = []
     for block in (out or "").split("\n\n"):
         lines = block.splitlines()
@@ -51,7 +65,7 @@ def read(root: Path) -> list[Worktree]:
         branch = next((x[len("branch refs/heads/"):] for x in lines if x.startswith("branch refs/heads/")), None)
         head = next((x[len("HEAD "):] for x in lines if x.startswith("HEAD ")), "")
         main = path == root
-        conventional = path.parent == root / FOLDER
+        conventional = path.parent == folder
         found.append(Worktree(MAIN if main else path.name, path, branch, head, main, conventional))
     return found
 
@@ -65,7 +79,7 @@ def count(root: Path) -> int:
     """How many worktrees the folder holds, without asking git: this is for the
     index of every repository. A linked worktree has a `.git` file."""
     try:
-        return sum(1 for d in (root / FOLDER).iterdir() if (d / ".git").is_file())
+        return sum(1 for d in folder_of(root).path.iterdir() if (d / ".git").is_file())
     except OSError:
         return 0
 
@@ -75,15 +89,37 @@ def here(ctx: Project) -> Worktree | None:
     return next((w for w in read(ctx.root) if w.assignable and w.path == ctx.checkout), None)
 
 
-def state(root: Path, w: Worktree) -> dict:
-    """Clean or not, and how far from the main checkout's HEAD."""
+def state(root: Path, w: Worktree, main_head: str | None = None) -> dict:
+    """Clean or not (None: git did not answer in time), and how far from the
+    main checkout's HEAD. `main_head` saves asking for it again."""
     status = _git(w.path, "status", "--porcelain")
-    main_head = (_git(root, "rev-parse", "HEAD") or "").strip()
+    if main_head is None:
+        main_head = (_git(root, "rev-parse", "HEAD") or "").strip()
     counts = (_git(w.path, "rev-list", "--left-right", "--count", f"{main_head}...HEAD") or "").split() \
         if main_head and not w.main else []
     return {"clean": status == "" if status is not None else None,
             "behind": int(counts[0]) if len(counts) == 2 else 0,
             "ahead": int(counts[1]) if len(counts) == 2 else 0}
+
+
+POOL = 8        # worktrees asked at once; each git call keeps _git's own timeout
+
+
+def states(root: Path, trees: list[Worktree]) -> dict[Path, dict]:
+    """`state` of each worktree, by path: the main checkout's HEAD from what
+    `git worktree list` already said, and the worktrees in a small pool, so many
+    of them cost about as long as the slowest few (p-pw7ft8 s3-2)."""
+    if not trees:
+        return {}
+    main = next((w for w in read(root) if w.main), None) if not any(w.main for w in trees) else \
+        next(w for w in trees if w.main)
+    main_head = main.head if main and main.head else (_git(root, "rev-parse", "HEAD") or "").strip()
+    if len(trees) == 1:
+        return {trees[0].path: state(root, trees[0], main_head)}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(POOL, len(trees))) as pool:
+        found = list(pool.map(lambda w: state(root, w, main_head), trees))
+    return {w.path: s for w, s in zip(trees, found)}
 
 
 # ---- plans ---------------------------------------------------------------------- #
@@ -102,7 +138,7 @@ def where(root: Path, name: str | None, known: list[Worktree] | None = None) -> 
         return None
     w = (next((x for x in known if x.assignable and x.name == name), None) if known is not None
          else get(root, name))
-    path = w.path if w else (root if name == MAIN else root / FOLDER / name)
+    path = w.path if w else (root if name == MAIN else folder_of(root).path / name)
     return {"name": name, "path": str(path), "gone": w is None}
 
 
@@ -137,7 +173,8 @@ def assign(root: Path, f: Folder, it: Item, name: str | None, by: str) -> str | 
     if name is not None and get(root, name) is None:
         names = [w.name for w in read(root) if w.assignable]
         outside = any(w.name == name for w in read(root))
-        raise WaterriseError(f"{name} is outside {FOLDER}/, so no plan can be assigned to it" if outside
+        raise WaterriseError(f"{name} is outside {layout.where_set(folder_of(root))}, so no plan can be assigned to it"
+                             if outside
                              else f"no worktree {name} in this project",
                              hint="there are: " + ", ".join(names) if names else None)
 
@@ -171,10 +208,12 @@ def placed(ctx: Project, it: Item, assigned: str | None) -> str | None:
 # ---- the ignore rule ------------------------------------------------------------ #
 
 def ignored(root: Path) -> bool | None:
-    """Does git ignore the folder? None outside a repository."""
-    if _git(root, "rev-parse", "--is-inside-work-tree") is None:
+    """Does git ignore the folder? None outside a repository, and for a folder
+    outside the checkout, which git does not see."""
+    s = folder_of(root)
+    if not s.inside or _git(root, "rev-parse", "--is-inside-work-tree") is None:
         return None
-    return _git(root, "check-ignore", "-q", f"{FOLDER}/x") is not None
+    return _git(root, "check-ignore", "-q", f"{s.rel}/x") is not None
 
 
 def ensure_ignored(ctx: Project) -> Path | None:
@@ -184,6 +223,7 @@ def ensure_ignored(ctx: Project) -> Path | None:
     so its rule goes in `.git/info/exclude`, which git does not track."""
     if ignored(ctx.root) is not False:
         return None
+    rule = ignore_rule(ctx.root)
     if ctx.home == "central":
         rel = (_git(ctx.root, "rev-parse", "--git-path", "info/exclude") or "").strip()
         path = (ctx.root / rel).resolve()
@@ -193,7 +233,7 @@ def ensure_ignored(ctx: Project) -> Path | None:
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     if text and not text.endswith("\n"):
         text += "\n"
-    path.write_text(text + IGNORE_RULE + "\n", encoding="utf-8", newline="\n")
+    path.write_text(text + rule + "\n", encoding="utf-8", newline="\n")
     return path
 
 
@@ -215,7 +255,7 @@ def _usable(ctx: Project) -> None:
         raise WaterriseError(f"{ctx.root} is not a git repository")
     if _main_checkout(ctx.root) is None:
         raise WaterriseError(f"{ctx.root} belongs to a bare repository, which has no main checkout "
-                             f"to hold a {FOLDER}/ folder")
+                             f"to hold a worktree folder")
 
 
 def check_name(name: str) -> None:
@@ -229,7 +269,7 @@ def add(ctx: Project, name: str, branch: str | None = None, start: str | None = 
     """Make `worktrees/<name>`. The worktree, and whether its branch is new."""
     _usable(ctx)
     check_name(name)
-    path = ctx.root / FOLDER / name
+    path = folder_of(ctx.root).path / name
     if path.exists():
         raise WaterriseError(f"{path} exists already")
     branch = branch or name
@@ -253,7 +293,7 @@ def remove(ctx: Project, name: str, f: Folder | None) -> Worktree:
     w = get(ctx.root, name)
     if w is None:
         names = [x.name for x in read(ctx.root) if x.conventional]
-        raise WaterriseError(f"no worktree {name} in {FOLDER}/",
+        raise WaterriseError(f"no worktree {name} in {layout.where_set(folder_of(ctx.root))}",
                              hint=("there are: " + ", ".join(names)) if names else None)
     held = plans_of(f, name, OPEN_FOLDERS) if f is not None and f.exists else []
     if held:

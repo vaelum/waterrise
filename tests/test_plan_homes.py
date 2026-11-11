@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from tests.test_planning import run
-from tests.test_worktrees import git
+from tests.test_worktrees import git, set_folder, wt_folder, wtf  # noqa: F401 (wt_folder is a fixture)
 from waterrise import answers, central, client, folder
 
 PLAN = '''#:schema ../.schema/v1.json
@@ -32,7 +32,7 @@ title = "Work"
 
 
 @pytest.fixture
-def project(tmp_path, monkeypatch):
+def project(tmp_path, monkeypatch, wt_folder):
     """A repository with a committed plan, assigned to `foo`, and worktrees foo and bar."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
@@ -42,6 +42,7 @@ def project(tmp_path, monkeypatch):
     root.mkdir()
     git(root, "init", "-q")
     assert run(root, "init") == 0
+    set_folder(root, wt_folder)
     write_plan(root, "p-aaaaaa", "assigned", "On main")
     write_plan(root, "p-bbbbbb", "unassigned", "Stays on main")
     git(root, "add", ".")
@@ -49,8 +50,8 @@ def project(tmp_path, monkeypatch):
     for name in ("foo", "bar"):
         assert run(root, "worktree", "add", name) == 0
     assert run(root, "assign", "p-aaaaaa", "foo") == 0
-    write_plan(root / "worktrees" / "foo", "p-aaaaaa", "assigned", "On the branch")
-    write_plan(root / "worktrees" / "foo", "p-cccccc", "only-here", "Only on foo")
+    write_plan(wtf(root) / "foo", "p-aaaaaa", "assigned", "On the branch")
+    write_plan(wtf(root) / "foo", "p-cccccc", "only-here", "Only on foo")
     return root
 
 
@@ -61,7 +62,7 @@ def write_plan(checkout: Path, item_id: str, name: str, title: str) -> Path:
 
 
 def places(root: Path) -> list[Path]:
-    return [root, root / "worktrees" / "foo", root / "worktrees" / "bar"]
+    return [root, wtf(root) / "foo", wtf(root) / "bar"]
 
 
 @pytest.mark.parametrize("where", [0, 1, 2])
@@ -83,7 +84,7 @@ def test_show_says_which_copy_counts(project, capsys):
     capsys.readouterr()
     assert run(project, "show", "p-aaaaaa") == 0
     out = capsys.readouterr().out
-    assert str(project / "worktrees" / "foo" / "planning" / "draft" / "assigned.toml") in out and "bar" in out
+    assert str(wtf(project) / "foo" / "planning" / "draft" / "assigned.toml") in out and "bar" in out
     assert run(project, "show", "p-cccccc") == 0
     assert "on its branch only" in capsys.readouterr().out
     assert run(project, "show", "p-bbbbbb") == 0
@@ -93,13 +94,13 @@ def test_show_says_which_copy_counts(project, capsys):
 def test_unassigning_reads_the_main_checkouts_copy_again(project, capsys):
     assert run(project, "assign", "p-aaaaaa", "--none") == 0
     capsys.readouterr()
-    run(project / "worktrees" / "foo", "show", "p-aaaaaa", "--json")
+    run(wtf(project) / "foo", "show", "p-aaaaaa", "--json")
     assert json.loads(capsys.readouterr().out)["data"]["title"] == "On main"
 
 
 def test_assigned_to_a_worktree_without_a_copy_reads_the_main_checkouts(project, capsys):
     run(project, "assign", "p-bbbbbb", "bar")
-    (project / "worktrees" / "bar" / "planning" / "draft" / "unassigned.toml").unlink()
+    (wtf(project) / "bar" / "planning" / "draft" / "unassigned.toml").unlink()
     capsys.readouterr()
     assert run(project, "status", "p-bbbbbb") == 0
     out = capsys.readouterr().out
@@ -108,7 +109,7 @@ def test_assigned_to_a_worktree_without_a_copy_reads_the_main_checkouts(project,
 
 def test_a_gone_worktree_reads_the_main_checkouts_copy(project, capsys):
     import shutil
-    shutil.rmtree(project / "worktrees" / "foo")
+    shutil.rmtree(wtf(project) / "foo")
     git(project, "worktree", "prune")
     capsys.readouterr()
     assert run(project, "show", "p-aaaaaa", "--json") == 0
@@ -121,7 +122,7 @@ def test_an_approval_in_the_home_opens_the_gate_everywhere(project, capsys, wher
     f = folder.read(project / "planning", project)
     it = f.get("p-aaaaaa")
     step = it.steps()[0]
-    answers.update(project / "worktrees" / "foo" / "planning" / "answers" / "p-aaaaaa.json", "p-aaaaaa",
+    answers.update(wtf(project) / "foo" / "planning" / "answers" / "p-aaaaaa.json", "p-aaaaaa",
                    lambda d: d["approvals"].update(s1={"verdict": "approved", "note": "", "at": "t",
                                                        "sha256": step_hash(step), "snapshot": step}))
     assert run(places(project)[where], "gate", "p-aaaaaa", "s1") == 0
@@ -129,7 +130,7 @@ def test_an_approval_in_the_home_opens_the_gate_everywhere(project, capsys, wher
 
 
 def test_a_move_happens_in_the_home(project, capsys):
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     git(foo, "add", "planning")
     git(foo, "commit", "-qm", "the plan on its branch")
     f = folder.read(project / "planning", project)
@@ -143,14 +144,14 @@ def test_a_move_happens_in_the_home(project, capsys):
 def test_check_covers_the_copy_that_counts(project, capsys):
     capsys.readouterr()
     assert run(project, "check") == 0
-    (project / "worktrees" / "foo" / "planning" / "draft" / "assigned.toml").write_text("not = toml = at all", encoding="utf-8")
+    (wtf(project) / "foo" / "planning" / "draft" / "assigned.toml").write_text("not = toml = at all", encoding="utf-8")
     assert run(project, "check") == 1
     assert "not valid TOML" in capsys.readouterr().out
     assert run(project, "gate", "p-aaaaaa", "s1") == 1      # never answered for by the older copy
 
 
 def test_a_new_item_lives_where_it_is_made(project, capsys):
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     assert run(foo, "new", "plan", "made-here") == 0
     assert (foo / "planning" / "draft" / "made-here.toml").exists()
     assert not (project / "planning" / "draft" / "made-here.toml").exists()
@@ -162,7 +163,7 @@ def test_a_new_item_lives_where_it_is_made(project, capsys):
 
 
 def test_a_merge_brings_a_plan_back_to_the_main_checkout(project, capsys):
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     git(foo, "add", "planning")
     git(foo, "commit", "-qm", "plans on the branch")
     git(project, "add", ".")
@@ -182,7 +183,7 @@ def test_a_central_project_reads_its_central_folder_only(project, capsys):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"repos": [entry]}), encoding="utf-8")
     capsys.readouterr()
-    assert run(project / "worktrees" / "foo", "show", "p-aaaaaa") == 1
+    assert run(wtf(project) / "foo", "show", "p-aaaaaa") == 1
     assert run(project, "list", "items", "--json") == 0
     assert json.loads(capsys.readouterr().out) == []
 
@@ -198,13 +199,13 @@ def test_assigning_says_when_another_copy_starts_to_count(project, capsys):
 
 
 def test_a_new_worktree_is_not_sparse(project):
-    assert (project / "worktrees" / "bar" / "planning" / "draft" / "assigned.toml").exists()
-    assert git(project / "worktrees" / "bar", "status", "--porcelain") == ""
+    assert (wtf(project) / "bar" / "planning" / "draft" / "assigned.toml").exists()
+    assert git(wtf(project) / "bar", "status", "--porcelain") == ""
     assert git(project, "config", "--get-all", "extensions.worktreeConfig", check=False) == ""
 
 
 def test_editing_a_plan_in_its_home_is_normal_and_a_copy_is_named(project, capsys):
-    foo, bar = project / "worktrees" / "foo", project / "worktrees" / "bar"
+    foo, bar = wtf(project) / "foo", wtf(project) / "bar"
     capsys.readouterr()
     assert run(foo, "check") == 0                # both of foo's edits are in their home
     assert "copy of" not in capsys.readouterr().out
@@ -219,7 +220,7 @@ def test_editing_a_plan_in_its_home_is_normal_and_a_copy_is_named(project, capsy
 
 
 def test_a_protocol_stays_in_the_main_checkout_and_survives_removing_the_worktree(project, capsys):
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     assert run(foo, "note", "p-aaaaaa", "s1", "from the worktree") == 0
     protocol = project / "planning" / "protocols" / "p-aaaaaa" / "s1.md"
     assert "from the worktree" in protocol.read_text(encoding="utf-8")
@@ -233,7 +234,7 @@ def test_a_protocol_stays_in_the_main_checkout_and_survives_removing_the_worktre
 
 
 def test_a_plan_only_on_an_unmerged_branch_holds_the_removal_back(project, capsys):
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     run(project, "assign", "p-aaaaaa", "--none")
     git(foo, "add", "planning")
     git(foo, "commit", "-qm", "plans on the branch")
@@ -252,7 +253,7 @@ def test_the_mcp_tools_find_a_plan_in_its_home(project, monkeypatch):
     monkeypatch.setattr(workplan, "command", lambda: [sys.executable, "-m", "waterrise"])
     monkeypatch.setattr(workplan, "page_url", lambda plan: None)
     monkeypatch.setenv("PYTHONPATH", str(Path(__file__).resolve().parents[1]))
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     for item_id, home in (("p-bbbbbb", None), ("p-aaaaaa", foo), ("p-cccccc", foo)):
         plan = workplan.resolve(item_id, foo)
         assert plan.repo == project
@@ -294,7 +295,7 @@ def test_the_page_shows_one_card_per_plan_with_its_branch(service_on):
 
 def test_answers_on_the_page_are_written_in_the_plans_home(service_on):
     project, port, slug = service_on
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     _, item = client.call(port, "GET", f"/api/r/{slug}/item/p-aaaaaa")
     assert item["home"]["name"] == "foo"
     status, _ = client.call(port, "PUT", f"/api/r/{slug}/approval/p-aaaaaa/s1",
@@ -311,7 +312,7 @@ def test_answers_on_the_page_are_written_in_the_plans_home(service_on):
 
 def test_a_move_on_the_page_runs_in_the_home(service_on):
     project, port, slug = service_on
-    foo = project / "worktrees" / "foo"
+    foo = wtf(project) / "foo"
     git(foo, "add", "planning")
     git(foo, "commit", "-qm", "plans on the branch")
     _, item = client.call(port, "GET", f"/api/r/{slug}/item/p-cccccc")
@@ -335,5 +336,40 @@ def test_the_service_watches_the_worktrees_planning_folders(service_on):
     project, port, slug = service_on
     entry = {"slug": slug, "path": str(project), "planning": str(project / "planning")}
     before = service._signature(entry)
-    write_plan(project / "worktrees" / "bar", "p-dddddd", "new", "Made in bar")
+    write_plan(wtf(project) / "bar", "p-dddddd", "new", "Made in bar")
     assert service._signature(entry) != before
+
+
+# ---- identical copies are parsed once (p-pw7ft8 s3-6) ------------------------------ #
+
+def test_an_edited_copy_is_read_with_its_own_text(project):
+    f = folder.read(project / "planning", project)
+    main = f.main_items["p-bbbbbb"]
+    bar = f.copies["bar"].get("p-bbbbbb")
+    assert bar.data is main.data, "an identical copy shares what was parsed"
+    copy = wtf(project) / "bar" / "planning" / "draft" / "unassigned.toml"
+    copy.write_text(copy.read_text(encoding="utf-8").replace("Stays on main", "Edited in bar"), encoding="utf-8")
+    f = folder.read(project / "planning", project)
+    assert f.copies["bar"].get("p-bbbbbb").title == "Edited in bar"
+    assert f.main_items["p-bbbbbb"].title == "Stays on main"
+    assert f.get("p-bbbbbb").title == "Stays on main", "the main checkout's copy still counts"
+
+
+def test_a_broken_copy_in_its_home_has_its_own_problem(project):
+    home = wtf(project) / "foo" / "planning" / "draft" / "assigned.toml"
+    home.write_text(home.read_text(encoding="utf-8") + "\nthis is not toml\n", encoding="utf-8")
+    f = folder.read(project / "planning", project)
+    broken = [it for it in f.items if it.path == home]
+    assert broken and not broken[0].parsed
+    assert any("not valid TOML" in p.message for p in broken[0].problems)
+    assert f.main_items["p-aaaaaa"].parsed and not f.main_items["p-aaaaaa"].problems
+
+
+def test_the_cache_stays_right_when_it_evicts(project, monkeypatch):
+    monkeypatch.setattr(folder, "_PARSED_LIMIT", 1)      # every new text evicts the one before
+    monkeypatch.setattr(folder, "_PARSED", {})
+    monkeypatch.setattr(folder, "_parsed_size", 0)
+    f = folder.read(project / "planning", project)
+    assert {it.id: it.title for it in f.items if it.id} == {
+        "p-aaaaaa": "On the branch", "p-bbbbbb": "Stays on main", "p-cccccc": "Only on foo"}
+    assert len(folder._PARSED) <= 1

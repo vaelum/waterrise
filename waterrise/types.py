@@ -249,6 +249,9 @@ CONFIG_SPEC = Spec("planning.toml", {
     "format": F(T("int"), "the format version: 1", True),
     "user": F(STR, "how the pages and `status` name the user (default: git's user.name)"),
     "plan_approval": F(BOOL, "a plan needs the user's approval to leave draft/", default=True),
+    "worktrees": F(STR, "the folder this project's worktrees live in, relative to the main checkout, `/` "
+                        "separated, may go up with `..` (default `worktrees`; a machine may override it: "
+                        "`waterrise projects worktrees`)"),
 })
 
 

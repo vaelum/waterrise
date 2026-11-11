@@ -49,3 +49,29 @@ claude mcp add --scope user work-plan -- python3 "$PWD/waterrise/mcp/server.py"
 
 The work-plan skill runs the server from its own folder's checkout, so link
 it rather than copy it.
+
+## While it works
+
+A plan's page is where you steer the agent working it with `/work-plan`:
+
+- **Pause and Continue**, at the top of the side panel. Paused, the agent
+  finishes the step it is on, commits and records it, starts nothing new, and
+  waits until you press Continue.
+- **The chat**, at the bottom of the side panel. A message is a comment on the
+  whole plan, so the agent gets it at once; it answers under your message
+  (`waterrise reply`), makes the change, and marks it done with what changed. A
+  message sent while no agent works the plan waits for the next one.
+- **Progress, the timeline and the protocols**: the side panel shows each
+  phase and step as it goes, the plan's timeline its log and every note newest
+  first, and the step being worked on has its protocol open and following.
+
+## Several agents
+
+`/work-plan` may work independent steps at once. When two or more agent steps
+are ready, have no gate and touch different files, the agent hands each to a
+subagent, which works that step only: it keeps the step's protocol and commits
+its own files by path, and never edits the plan, your answers or another step's
+protocol. The agent you started stays the only writer of the plan file: it sets
+each step active before handing it off, checks what comes back against the
+step's `done_when`, and records it done. Gated steps, your answers, comments and
+the chat stay with it, and steps that touch the same files are worked in order.

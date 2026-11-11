@@ -88,7 +88,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from . import answers as answers_mod
-from . import central, context, dirs, lock
+from . import central, context, dirs, layout, lock
 from . import check as check_mod
 from . import folder as folder_mod
 from .client import API, HEADER, SERVICE
@@ -231,6 +231,20 @@ class Registry:
             self.save()
             return entry
 
+    def set_worktrees(self, slug: str, value: str | None) -> dict | None:
+        """This machine's worktree folder for a project, over its planning.toml;
+        None removes it, so planning.toml counts again."""
+        with self.lock:
+            entry = self.by_slug(slug)
+            if entry is None:
+                return None
+            if value is None:
+                entry.pop("worktrees", None)
+            else:
+                entry["worktrees"] = value
+            self.save()
+            return entry
+
     def forget(self, slug: str) -> bool:
         with self.lock:
             before = len(self.repos)
@@ -276,6 +290,54 @@ def _folder(entry: dict) -> folder_mod.Folder:
     return folder_mod.read(Path(entry["planning"]), central.git_root(entry))
 
 
+# ---- what the pages read, kept while nothing behind it changes (p-pw7ft8 s3-3) ---- #
+#
+# Only what the planning folders decide is kept: the folder as read, and its check
+# report. The key is the signature the change events use (every file under the
+# watched planning folders, protocols included), the registry entry, the top
+# .gitignore and, for the report, today's date. What git says (the branch, the
+# worktrees and their state) is asked on every request, since it changes without
+# a planning file changing. Writes read the folder fresh. In memory only: one
+# entry per project, gone with the service.
+
+_views_lock = threading.Lock()
+_kept: dict[tuple[str, str], tuple[tuple, object]] = {}
+
+
+def _view_key(entry: dict, signature: str | None = None) -> tuple:
+    root = Path(entry["path"])
+    return (json.dumps(entry, sort_keys=True, default=str), signature or _signature(entry),
+            layout._stamp(root / ".gitignore"))
+
+
+def _kept_or(entry: dict, what: str, key: tuple, make):
+    slot = (entry["slug"], what)
+    with _views_lock:
+        hit = _kept.get(slot)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    value = make()
+    with _views_lock:
+        _kept[slot] = (key, value)
+    return value
+
+
+def _folder_view(entry: dict, key: tuple | None = None) -> folder_mod.Folder:
+    """The folder for a page to read, the same object while nothing changed.
+    Never for writing."""
+    return _kept_or(entry, "folder", key or _view_key(entry), lambda: _folder(entry))
+
+
+def _check_view(entry: dict, f: folder_mod.Folder, key: tuple):
+    return _kept_or(entry, "check", (*key, _dt.date.today().isoformat()),
+                    lambda: check_mod.run(f, git=False))
+
+
+def forget_views() -> None:
+    with _views_lock:
+        _kept.clear()
+
+
 def _watched(entry: dict) -> list[Path]:
     """The planning folders behind a project's pages: its own, and each worktree's
     under `worktrees/`, where a plan can live."""
@@ -285,8 +347,29 @@ def _watched(entry: dict) -> list[Path]:
     return [planning, *(h.planning for h in folder_mod.worktree_homes(planning.resolve(), central.git_root(entry).resolve()))]
 
 
-def _signature(entry: dict) -> str:
-    return "".join(_tree_signature(p) for p in _watched(entry))
+def _signature(entry: dict, *, protocols: bool = True) -> str:
+    return "".join(_tree_signature(p, protocols=protocols) for p in _watched(entry))
+
+
+_ticks: dict[tuple, tuple[float, str]] = {}
+_ticks_lock = threading.Lock()
+
+
+def _tick_signature(entry: dict, *, protocols: bool = True) -> str:
+    """`_signature` for the change streams: computed once for every stream that
+    asks within the same half tick, so many open tabs cost one walk. Only for
+    the streams: a page's request reads `_signature` itself, so it always sees
+    its own write (p-pw7ft8 s3-4)."""
+    key = (entry.get("slug"), entry.get("planning"), protocols)
+    now = time.monotonic()
+    with _ticks_lock:
+        hit = _ticks.get(key)
+    if hit is not None and now - hit[0] < Handler.EVENT_TICK / 2:
+        return hit[1]
+    sig = _signature(entry, protocols=protocols)
+    with _ticks_lock:
+        _ticks[key] = (now, sig)
+    return sig
 
 
 def _home_view(home: folder_mod.Home | None, known: list) -> dict | None:
@@ -306,7 +389,8 @@ def repo_view(entry: dict, *, deep: bool = True) -> dict:
     out["worktree_count"] = worktrees_mod.count(root)
     if missing:
         return out
-    f = _folder(entry)
+    key = _view_key(entry)
+    f = _folder_view(entry, key)
     known = worktrees_mod.read(root) if deep else None
     out["typed"] = f.typed
     out["user"] = f.user
@@ -352,14 +436,17 @@ def repo_view(entry: dict, *, deep: bool = True) -> dict:
     out["legacy"] = f.legacy
     out["forms"] = f.forms
     if known is not None:
+        wf = worktrees_mod.folder_of(root)
+        states = worktrees_mod.states(root, [w for w in known if w.assignable])
+        out["worktree_folder"] = {"rel": wf.rel, "path": str(wf.path), "source": wf.source, "problem": wf.problem}
         out["worktrees"] = [
             {"name": w.name, "path": str(w.path), "branch": w.branch, "main": w.main,
-             **worktrees_mod.state(root, w),
+             **states[w.path],
              "plans": [i["id"] for i in items if w.name in ((i.get("worktree") or {}).get("name"),
                                                              (i.get("home") or {}).get("name"))]}
             for w in known if w.assignable]
     if deep:
-        rep = check_mod.run(f, git=False)
+        rep = _check_view(entry, f, key)
         out["errors"] = rep.errors
         out["warnings"] = rep.warnings
     return out
@@ -435,8 +522,38 @@ def _approval_view(a, compare) -> dict:
     return view
 
 
+TIMELINE = 200      # entries a plan's page shows; the rest are counted
+
+
+def timeline(it: folder_mod.Item, notes: list[dict]) -> tuple[list[dict], int]:
+    """A plan's `[[log]]` and its steps' protocol notes, newest first
+    (p-pw7ft8, decision `logs`). A log entry has a day but no time; it goes at
+    the time of its step's last note that day, which is when it was written,
+    or, without one, just after the log entry before it. The newest TIMELINE
+    entries, and how many more."""
+    last: dict[tuple[str, str], str] = {}
+    for n in notes:
+        key = (n["step"], n["at"][:10])
+        last[key] = max(last.get(key, ""), n["at"])
+    rows = [{"kind": "note", **n} for n in notes]
+    before = ""                 # the log is written in order: no entry is older than the one above it
+    for i, entry in enumerate(it.data.get("log") or []):
+        if not isinstance(entry, dict):
+            continue
+        day = str(entry.get("on") or "")
+        step = str(entry.get("step") or "")
+        at = last.get((step, day)) or (before if before[:10] == day else f"{day} 00:00:00")
+        at = max(at, before) if before[:10] == day else at
+        before = at
+        rows.append({"kind": "log", "at": at, "day": day, "step": step or None,
+                     "text": str(entry.get("text") or ""), "commit": entry.get("commit"), "n": i})
+    # Newest first; at the same moment the log, written after the note, first.
+    rows.sort(key=lambda r: (r["at"], r["kind"] == "log", r.get("n", 0)), reverse=True)
+    return rows[:TIMELINE], max(0, len(rows) - TIMELINE)
+
+
 def item_view(entry: dict, item_id: str) -> dict | None:
-    f = _folder(entry)
+    f = _folder_view(entry)
     it = f.get(item_id)
     if it is None:
         return None
@@ -464,6 +581,7 @@ def item_view(entry: dict, item_id: str) -> dict | None:
         view["worktrees"] = [w.name for w in known if w.assignable]
         view["reports"] = plan_reports(f, it)
         view["protocols"] = protocol_mod.summaries(f.root, it.id)
+        view["timeline"], view["timeline_older"] = timeline(it, protocol_mod.notes(f.root, it.id))
     if it.kind == "report":
         doc = check_mod.report_document(it)
         version = int(doc.stat().st_mtime) if doc.is_file() else 0
@@ -477,21 +595,42 @@ def item_view(entry: dict, item_id: str) -> dict | None:
     return view
 
 
-def _tree_signature(root: Path) -> str:
+def _tree_signature(root: Path, *, protocols: bool = True) -> str:
     """Names, sizes and mtimes of everything under `root`: changes when any
-    file is written, added, moved or deleted. Polled, not inotify: stdlib-only,
-    and a planning folder is a few dozen small files."""
+    file is written, added, moved or deleted. Polled, not inotify: stdlib-only.
+    One `scandir` walk, which stats as it lists (p-pw7ft8 s3-4).
+
+    Without `protocols`, the protocols folder counts by the mtimes of its plan
+    folders only: a protocol that is added shows, one that grows does not. The
+    index needs no more; a plan's own page watches every line."""
     h = hashlib.sha256()
-    try:
-        for p in sorted(root.rglob("*")):
-            if p.name.endswith(".lock") or p.name.endswith(".tmp"):
+    stack = [str(root)]
+    top = os.path.join(str(root), protocol_mod.FOLDER)
+    seen = False
+    while stack:
+        d = stack.pop()
+        try:
+            entries = sorted(os.scandir(d), key=lambda x: x.name)
+        except OSError:
+            continue
+        seen = True
+        shallow = not protocols and d == top
+        for x in entries:
+            if x.name.endswith(".lock") or x.name.endswith(".tmp"):
                 continue
             try:
-                st = p.stat()
+                # A real stat, not x.stat(): on Windows that is the listing's
+                # cached copy, which lags a write and changes a folder's entry
+                # when a file in it grows (p-pw7ft8 s5-2). On POSIX the two are
+                # the same lstat.
+                st = os.stat(x.path, follow_symlinks=False)
+                is_dir = x.is_dir(follow_symlinks=False)
             except OSError:
                 continue
-            h.update(f"{p}:{st.st_mtime_ns}:{st.st_size};".encode())
-    except OSError:
+            h.update(f"{x.path}:{st.st_mtime_ns}:{st.st_size};".encode())
+            if is_dir and not shallow:
+                stack.append(x.path)
+    if not seen:
         h.update(b"missing")
     return h.hexdigest()
 
@@ -649,7 +788,7 @@ class Handler(BaseHTTPRequestHandler):
                 it = fold.get(api[3])
                 if it is None:
                     return self._error(404, "no such item")
-                paths = [it.path, fold.answers_path(it.id), fold.assignments_path, f, Path(entry["path"]) / worktrees_mod.FOLDER,
+                paths = [it.path, fold.answers_path(it.id), fold.assignments_path, f, worktrees_mod.folder_of(Path(entry["path"])).path,
                          *(h.planning / it.folder for h in folder_mod.worktree_homes(fold.root, fold.repo))]
                 if it.kind == "plan":
                     # Its page lists its reports and its steps' protocols: a
@@ -696,8 +835,11 @@ class Handler(BaseHTTPRequestHandler):
             """A signature per repository behind the stream, and "" for the registry."""
             if scope == "repo":
                 entry = self.registry.by_slug(slug)
-                return {slug: _signature(entry)} if entry else {}
-            sigs = {r["slug"]: _signature(r) for r in self.registry.repos}
+                return {slug: _tick_signature(entry)} if entry else {}
+            # scope=all is what the shared worker holds for every tab, plan pages
+            # with their live protocols included; only an index page's own
+            # stream may skip what protocols say.
+            sigs = {r["slug"]: _tick_signature(r, protocols=scope != "index") for r in self.registry.repos}
             sigs[""] = _etag(self.registry.path)
             return sigs
 
@@ -829,6 +971,19 @@ class Handler(BaseHTTPRequestHandler):
             if home not in central.HOMES or not isinstance(planning, str) or not Path(planning).is_absolute():
                 return self._error(400, f"home must be one of {', '.join(central.HOMES)}, planning an absolute path")
             entry = self.registry.set_home(api[1], home, str(Path(planning).resolve()))
+            if entry is None:
+                return self._error(404, "no such repository")
+            return self._json(200, entry)
+        if len(api) == 3 and api[0] == "repos" and api[2] == "worktrees" and method == "PUT":
+            if not self._authorized():
+                return self._error(403, "a project's worktree folder is set by `waterrise projects worktrees`")
+            body = self._body()
+            if body is None:
+                return None
+            value = body.get("worktrees")
+            if value is not None and (why := layout.invalid(value)):
+                return self._error(400, f"worktrees {why}")
+            entry = self.registry.set_worktrees(api[1], value)
             if entry is None:
                 return self._error(404, "no such repository")
             return self._json(200, entry)
@@ -1025,6 +1180,21 @@ class Handler(BaseHTTPRequestHandler):
                         d["plan_approval"] = record
             answers_mod.update(path, it.id, change)
             return self._json(200, {"saved": True})
+
+        if what == "pause" and method == "PUT" and local is None:
+            if it.kind != "plan":
+                return self._error(400, "only a plan is paused")
+            want = body.get("paused")
+            if not isinstance(want, bool):
+                return self._error(400, "paused must be true or false")
+
+            def change(d: dict) -> None:
+                if want:
+                    d["paused"] = {"at": answers_mod.now(), "by": "page"}
+                else:
+                    d.pop("paused", None)
+            answers_mod.update(path, it.id, change)
+            return self._json(200, {"paused": want})
 
         if what == "comment" and method == "POST":
             on = body.get("on") or ""

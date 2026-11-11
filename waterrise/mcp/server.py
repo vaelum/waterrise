@@ -79,7 +79,7 @@ PROMPT = {
 
 def prompt_text(plan: str) -> str:
     return f"""\
-Work the plan `{plan}` to the end, without the user having to come back to this chat.
+Work the plan `{plan}` to the end, without the user having to come back to this conversation.
 
 The user talks to you only through the plan's page (decisions, approvals, ticks, comments). \
 You talk to the user only through the plan file. So this is one long loop:
@@ -96,7 +96,10 @@ Protocols stay in the main checkout whatever you do.
 3. If it says WORK, do all of it, in this order:
    - answers: act on each answered decision, then record `resolved`, `outcome`, `resolved_on`;
    - disapprovals: drop the step with the user's note as `reason`, or rewrite it (which asks again);
-   - comments: change the plan as asked (or answer in the item), then `waterrise resolve` each;
+   - comments: change the plan as asked (or answer in the item), then `waterrise resolve` each. \
+A comment on the whole plan is a message in the chat beside it: answer every one in the chat \
+with `waterrise reply <id> <c…> TEXT` (what you will do, or a question back), make the change, \
+and `waterrise resolve` it with a note that says what changed;
    - ticked user steps: set them `done`;
    - ready steps: `state = "active"`, do the work, commit, `state = "done"` with `commit`, \
 a `[[log]]` entry, `updated`, `waterrise check`. Keep the step's protocol as you go: \
@@ -112,21 +115,36 @@ the session: `active` when you start a step, `done` with its `commit` and `[[log
 entry as soon as it is finished and before you start the next, a ticked user step \
 `done` as soon as you see it, a resolved decision or comment the same way, and \
 `waterrise check` after every edit.
-4. Anything you need from the user becomes part of the plan, never a chat question: a new \
+   Call `plan_status` again before you start each step: the user can pause the plan in its \
+page at any time. If it says PAUSED, finish the step you are on (commit it and record it \
+done), start nothing new, tell the user once that you have stopped, and call \
+`wait_for_plan` until it says CONTINUED.
+   Several agents: when two or more agent steps are ready, have no gate and touch different \
+files, you may hand each to a subagent and work them at once. Set each `active` first. Tell \
+each subagent the plan id and its step's title, `details` and `done_when`, the repository, \
+the files it may change, and to keep the step's protocol with `waterrise note` and \
+`waterrise run` for that step only; that it must not edit the plan file, anything in \
+`planning/answers/`, or another step's protocol; and that it commits only its own files, \
+by path (`git commit -- <files>`), and reports the commit. You alone write the plan file: \
+when a subagent reports, check its work against `done_when`, then set the step `done` \
+with its `commit` and a `[[log]]` entry. Keep gated steps, answers, comments, the chat and \
+the page to yourself, and steps that touch the same files in order.
+4. Anything you need from the user becomes part of the plan, never a question in this conversation: a new \
 `[[decision]]` placed in the `needs` of the steps it holds up, a `gate = true` on a risky \
 step, a user step for what only the user can do. If a step cannot go on for a reason \
 outside the plan, set it `blocked` with a `reason` and add what would unblock it.
 5. When `plan_status` says WAITING, tell the user once, briefly, what you need and give the \
 page URL (send a push notification too if you have a tool for it). Then call \
 `wait_for_plan` with plan `{plan}`.
-   - USER ACTED or CHANGED: go back to 2.
+   - USER ACTED, CONTINUED or CHANGED: go back to 2.
+   - PAUSED: start nothing new, and call `wait_for_plan` again.
    - NOTHING YET: call `wait_for_plan` again, at once, without writing anything. Do not \
 end your turn because the user is quiet; waiting is the job.
    - ERROR: look at it, fix what is yours to fix, and wait again.
 6. Stop only when the plan is DONE (summarise what was done, with commits), or the user tells \
 you to stop in a comment or here.
 
-Keep chat output short: one line per finished step or handled answer. The detail \
+Keep your output in this conversation short: one line per finished step or handled answer. The detail \
 belongs in the plan's log.
 """
 

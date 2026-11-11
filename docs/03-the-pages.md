@@ -16,8 +16,10 @@ tall as the fullest one, and a drop lands anywhere in a lane.
 If the project has worktrees, the page lists each with its branch, whether it
 is clean, how far it is from the main checkout, and its plans. A card shows the
 worktree it is assigned to, and a filter above the lanes shows one worktree's
-plans. A worktree that no longer exists shows as gone. On the index, a project
-shows how many worktrees it has.
+plans. A worktree that no longer exists shows as gone, and one whose git does not
+answer in time shows as unknown. Below the list, the page names the project's
+worktree folder and where it is set. On the index, a project shows how many
+worktrees it has.
 
 ## An item's page
 
@@ -45,9 +47,22 @@ are all finished.
   or a finding. Whoever works the plan answers by changing it, and marks the
   comment handled with a note.
 
+Beside a plan, under your to-do list:
+
+- **Pause and Continue.** Paused, the agent working the plan finishes the step
+  it is on and then waits until you press Continue.
+- **Progress.** Each phase with how many of its steps are done and a bar, its
+  steps with their state, the one being worked on marked; each links to its
+  step. At phone width the panel sits above the plan, with Progress folded.
+- **The chat.** Ask the agent to change the plan, or ask it something. A message
+  is a comment on the whole plan; the agent's answer appears under it, and what
+  it did once it is done. It answers while it works the plan with `/work-plan`.
+
 The pages update live while an agent works. Each agent step can keep a
 protocol, the commands it ran and what it noted, which you can read at the
-step as it is written.
+step as it is written; the step being worked on has its protocol open, following
+the newest line. Near the end of a plan's page, its timeline lists the log and
+every note of every step, newest first.
 
 ## Two homes
 

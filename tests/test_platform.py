@@ -525,7 +525,8 @@ def test_every_subprocess_names_its_stdin():
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
                     and node.func.attr in ("run", "Popen", "check_output", "call") \
                     and getattr(node.func.value, "id", "") == "subprocess" \
-                    and not any(k.arg == "stdin" for k in node.keywords):
+                    and not any(k.arg in ("stdin", "input") for k in node.keywords):
+                # input= gives the child a pipe of its own, and run() refuses it with stdin=
                 missing.append(f"{f.name}:{node.lineno}")
     assert missing == []
 

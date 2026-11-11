@@ -41,7 +41,8 @@ planning/
 - **Two writers, never the same file.** You write the item. The planning
   service writes `answers/<id>.json` when the user clicks in the page. The only
   commands of yours that touch an answers file are `waterrise resolve`,
-  `waterrise convert` and `waterrise assign`, which writes `assignments.json`.
+  `waterrise reply`, `waterrise convert` and `waterrise assign`, which writes
+  `assignments.json`.
 - Markdown plans and the old HTML forms are shown read-only and reported by
   `check` as warnings. `waterrise convert <file>` makes a typed skeleton.
 
@@ -146,12 +147,22 @@ steps. The user approves the plan as a whole before it leaves `draft/` (when
 | mode | when | the user, in the page | you |
 |---|---|---|---|
 | **Decide** | a draft with open decisions | picks an option or writes an own answer | write the decisions (section 4), run `serve`, give the URL; act on answers, record them |
-| **Extend** | any time | comments on the item, a section, a phase, a decision, a step or a finding | read comments in `status`, change the item, then `waterrise resolve <id> <c…> --note "what you did"`; when something new comes up mid-work, add a decision and put it in the `needs` of the steps it holds up |
-| **Track** | todo and in-progress | watches progress live; ticks their own steps | set `state = "active"` when you start a step and `"done"` with `commit` when it is, append a `[[log]]` entry, `waterrise move` the item, `waterrise check` after every edit |
+| **Extend** | any time | comments on the item, a section, a phase, a decision, a step or a finding; on a plan, writes in the chat beside it | read comments in `status`, change the item, then `waterrise resolve <id> <c…> --note "what you did"`; answer a chat message (a comment on the whole plan) first with `waterrise reply <id> <c…> TEXT`; when something new comes up mid-work, add a decision and put it in the `needs` of the steps it holds up |
+| **Track** | todo and in-progress | watches progress live; ticks their own steps; pauses and continues the plan | set `state = "active"` when you start a step and `"done"` with `commit` when it is, append a `[[log]]` entry, `waterrise move` the item, `waterrise check` after every edit; while `status` says the plan is paused, finish the step you are on and start nothing new |
 | **Gate** | before a gated step; before a plan leaves draft | approves or disapproves, with a note; a change since an earlier answer is reviewed and answered in a popup | run `waterrise gate` right before the action (section 7) |
 
 A user step the user ticked in the page shows as "done in the page, not yet in
 the file" until you set its `state = "done"`.
+
+**Pause.** The user can pause a plan in its page. `status` then says so, and the
+MCP tools say PAUSED: finish the step you are on (commit it and record it done),
+start nothing new, and wait until the plan is continued. Answers, approvals and
+comments still arrive while it is paused.
+
+**The chat.** A plan's page has a chat beside it: each message is a comment on the
+whole plan. Answer every one with `waterrise reply` (what you will do, or a question
+back), make the change, and `waterrise resolve` it with what changed. A comment you
+replied to waits on the user, who writes again to go on.
 
 **The order is the user's.** The repository's page shows each folder as a
 lane, and the user drags the items into the order they want them done. The
@@ -241,12 +252,24 @@ separate project. A bare repository has no main checkout, so each of its worktre
 stays its own project. A central project's plans stay in the central repository,
 and all its worktrees read them there.
 
-- **The convention:** worktrees go in `worktrees/` at the top of the main
-  checkout. `waterrise worktree add NAME [--branch B] [--from REF] [--plan ID]`
-  makes one on a branch named NAME (the existing one if there is one, otherwise
-  new from the main checkout's HEAD), and has git ignore the folder: in the top
-  `.gitignore`, left uncommitted and said so, or in `.git/info/exclude` for a
-  central project.
+- **The project's worktree folder:** worktrees go in one folder, `worktrees/` at
+  the top of the main checkout unless the project sets another: `worktrees =
+  ".worktrees"` in `planning.toml`, a path relative to the main checkout, `/`
+  separated, which may go up (`../proj-wt`); never absolute or `~`. A machine can
+  override it for itself with `waterrise projects worktrees [SLUG|PATH] DIR`, and
+  `--default` drops that again; without DIR it says which folder is used and where
+  it is set. `worktree list`, `status` in a worktree and the page say the same.
+  Wherever this guide says `worktrees/`, it means that folder.
+- **Adding one:** `waterrise worktree add NAME [--branch B] [--from REF] [--plan ID]`
+  makes one in the folder, on a branch named NAME (the existing one if there is
+  one, otherwise new from the main checkout's HEAD), and has git ignore a folder
+  inside the checkout: in the top `.gitignore`, left uncommitted and said so, or in
+  `.git/info/exclude` for a central project. A folder beside the checkout needs no
+  rule.
+- **Changing the folder** moves nothing. A plan assigned to a worktree that is not
+  in the new folder reads as gone, and `check` says so and names the setting; bring
+  the worktree over with `git worktree move <old> <new>` (make the new folder
+  first), or set the folder back.
 - **Where a plan lives.** Every worktree checks out a copy of every plan, and one
   rule says which copy counts, wherever a command runs: a plan assigned to a
   worktree that has a copy lives there; otherwise a plan in the main checkout lives
@@ -312,6 +335,7 @@ and all its worktrees read them there.
 | `waterrise move ID FOLDER` | move it, after checking the folder's rules |
 | `waterrise gate ID [STEP]` | exit 0 only if approved and unchanged |
 | `waterrise resolve ID COMMENT --note TEXT` | mark a comment handled |
+| `waterrise reply ID COMMENT TEXT` | answer a comment or a chat message, without marking it handled |
 | `waterrise assign ID NAME\|--none` | assign a plan to a worktree, or to none |
 | `waterrise worktree add NAME [--branch B] [--from REF] [--plan ID]` | a worktree in `worktrees/` |
 | `waterrise worktree list [--all] [--json]` | name, branch, clean or not, ahead/behind, path and plans |
@@ -322,6 +346,7 @@ and all its worktrees read them there.
 | `waterrise serve [--open]` | start or join the local service, register this repository, print the URL |
 | `waterrise service [status\|stop\|restart\|logs\|run]` | the service itself |
 | `waterrise projects [list\|add\|remove] [PATH] [--home repo\|central]` | the registered projects, and where each plans |
+| `waterrise projects worktrees [SLUG\|PATH] [DIR\|--default]` | the project's worktree folder on this machine: show it, set it over planning.toml, or drop it |
 | `waterrise install [--check VERSION] [--boot\|--no-boot] [--no-path] [--uninstall]` | waterrise itself |
 
 The service is one process per user for every repository, on
@@ -360,6 +385,7 @@ page; you commit nothing there yourself.
 | `format` | integer | yes | the format version: 1 |
 | `user` | string |  | how the pages and `status` name the user (default: git's user.name) |
 | `plan_approval` | boolean | default `true` | a plan needs the user's approval to leave draft/ |
+| `worktrees` | string |  | the folder this project's worktrees live in, relative to the main checkout, `/` separated, may go up with `..` (default `worktrees`; a machine may override it: `waterrise projects worktrees`) |
 
 #### Keys every item has
 

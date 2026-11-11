@@ -483,3 +483,15 @@ def test_the_prompt_says_where_plan_changes_are_committed():
     from waterrise.mcp.server import prompt_text
     text = prompt_text("p-4k7x2m")
     assert "main checkout" in text and "git -C <that checkout> commit" in text and "Protocols" in text
+
+
+def test_the_prompt_says_how_to_use_several_agents():
+    """p-pw7ft8 s8-1, decision `agents`: independent ready steps in parallel, the
+    main agent alone writes the plan."""
+    text = server.prompt_text("p-abc123")
+    assert "subagent" in text
+    for must in ("have no gate and touch different files", "You alone write the plan file",
+                 "by path", "must not edit the plan file", "steps that touch the same files in order"):
+        assert must in text, must
+    docs = (REPO / "docs" / "04-working-with-an-agent.md").read_text(encoding="utf-8")
+    assert "## Several agents" in docs and "only writer of the plan file" in docs

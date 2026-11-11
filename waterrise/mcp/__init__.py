@@ -144,7 +144,7 @@ def _item_id(path: Path) -> str | None:
 
 
 def _find_in(planning: Path, item_id: str) -> bool:
-    """Is the item in this folder alone? `_find_in_project` also looks under `worktrees/`."""
+    """Is the item in this folder alone? `_find_in_project` also looks in the project's worktree folder."""
     if not planning.is_dir():
         return False
     for folder in ("draft", "todo", "in-progress", "done", "notes"):
@@ -279,7 +279,7 @@ def page_url(plan: Plan) -> str | None:
 
 @dataclass
 class Assessment:
-    verdict: str                           # "work", "waiting" or "done"
+    verdict: str                           # "work", "waiting", "paused" or "done"
     agent: list[str] = field(default_factory=list)
     user: list[str] = field(default_factory=list)
 
@@ -305,6 +305,13 @@ def assess(st: dict) -> Assessment:
     folder = st.get("folder", "")
     if folder == "done":
         return Assessment("done")
+    p = st.get("paused")
+    if isinstance(p, dict) and p.get("at"):
+        # Paused in the page (p-pw7ft8, decision `pause`: after the current step).
+        active = [s for s in st.get("open", []) if s.get("by") == "agent" and s.get("state") == "active"]
+        agent = [f"step {s['id']}: {s.get('title', '')} is active: finish it, commit it and record it "
+                 "done, then start nothing else" for s in active]
+        return Assessment("paused", agent, [f"paused in the page since {p['at']}: press Continue there"])
 
     agent = [f"{x['what']} {x.get('local') or ''}: {x.get('text', '')}".replace(" :", ":")
              for x in st.get("for_agent", [])]
@@ -342,6 +349,7 @@ def fingerprint(st: dict) -> tuple:
         tuple(sorted((x["what"], x.get("local") or "", x.get("text", "")) for x in st.get("for_user", []))),
         tuple(sorted((s.get("id"), s.get("approval"), s.get("ticked")) for s in st.get("open", []))),
         st.get("folder"),
+        bool(st.get("paused")),
     )
 
 
@@ -395,6 +403,8 @@ def tool_status(spec: str, cwd: Path | None) -> str:
     a = assess(st)
     head = {"work": "WORK: there is something for you to do now.",
             "waiting": "WAITING: everything left waits on the user; call wait_for_plan.",
+            "paused": "PAUSED: the user paused this plan in its page. Finish the step you are on, if any, "
+                      "then start nothing new and call wait_for_plan until it is continued.",
             "done": "DONE: the plan is in done/."}[a.verdict]
     return describe(plan, st, a, page_url(plan), head)
 
@@ -407,7 +417,7 @@ def tool_wait(spec: str, cwd: Path | None, minutes: float | None,
     poll = POLL_SECONDS if poll is None else poll
     st = status(plan)
     a = assess(st)
-    if a.verdict != "waiting":
+    if a.verdict not in ("waiting", "paused"):
         head = ("NOT WAITING: there is already something for you to do; do it, then wait."
                 if a.verdict == "work" else "DONE: the plan is in done/; there is nothing to wait for.")
         return describe(plan, st, a, page_url(plan), head)
@@ -436,7 +446,12 @@ def tool_wait(spec: str, cwd: Path | None, minutes: float | None,
         if a.verdict == "done":
             return describe(plan, st, a, url, "DONE: the plan moved to done/.")
         if a.verdict == "work":
-            return describe(plan, st, a, url, "USER ACTED: there is something for you to do now.")
+            head = ("CONTINUED: the user continued the plan in its page; carry on." if before[-1]
+                    else "USER ACTED: there is something for you to do now.")
+            return describe(plan, st, a, url, head)
+        if a.verdict == "paused" and not before[-1]:
+            return describe(plan, st, a, url, "PAUSED: the user paused this plan in its page. "
+                            "Start nothing new; call wait_for_plan until it is continued.")
         if fingerprint(st) != before:
             return describe(plan, st, a, url,
                             "CHANGED: the user did something in the page, but nothing is ready for you yet. "

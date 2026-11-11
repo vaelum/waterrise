@@ -80,8 +80,18 @@ picker write `assignments.json`.
 All worktrees of a repository are one project with one page. A separate clone
 stays a separate project.
 
-Worktrees go in `worktrees/` at the top of the main checkout, which git ignores.
-`waterrise worktree add NAME` makes one, and it has `planning/` like any checkout.
+Worktrees go in one folder, `worktrees/` at the top of the main checkout by
+default, which git ignores. A project can choose another in `planning.toml`:
+
+```toml
+worktrees = ".worktrees"      # or "../myproject-wt", beside the checkout
+```
+
+The path is relative to the main checkout, so it holds in any clone and on Windows.
+A machine can override it for itself with `waterrise projects worktrees DIR`
+(`--default` drops it). `waterrise worktree add NAME` makes a worktree in that
+folder, and it has `planning/` like any checkout. Changing the folder moves
+nothing: move existing worktrees with `git worktree move`.
 
 A plan tracked in the repository can live in a worktree, on its branch, so plan
 and code travel together. A plan assigned to a worktree (`waterrise assign ID NAME`,

@@ -374,7 +374,7 @@
         out.push(lanes, h('p', { class: 'muted small lane-hint' },
           'Drag a card, or use its ⠿ handle with the arrow keys, to order a lane or move it to another. ',
           'A move is ', h('code', {}, 'planning move'), ': a lane whose rules the item does not meet says why and takes no drop.'));
-        if (trees.length > 1 || gone.length) out.push(h('h2', {}, 'Worktrees'), worktreeList(slug, trees, gone, assigned));
+        if (trees.length > 1 || gone.length) out.push(h('h2', {}, 'Worktrees'), worktreeList(slug, trees, gone, assigned, r.worktree_folder));
       }
       const notes = all.filter(i => i.folder === 'notes');
       if (notes.length) {
@@ -425,13 +425,14 @@
     function belongsTo(it, name) {
       return Boolean((it.worktree && it.worktree.name === name) || (it.home && it.home.name === name));
     }
-    function worktreeList(slug, trees, gone, assigned) {
+    function worktreeList(slug, trees, gone, assigned, folder) {
       const plansOf = ids => ids.length ? ids.flatMap((id, i) => [i ? ', ' : '', h('a', { href: `/r/${slug}/i/${id}` }, id)]) : [h('span', { class: 'muted' }, 'no plans')];
       return h('div', { class: 'rows worktrees' },
         trees.map(w => h('div', { class: 'worktree-row' },
           h('span', { class: 'wt-name' }, w.name),
           h('span', { class: 'wt-state' }, w.branch || 'detached', ' ',
-            badge(w.clean === false ? 'dirty' : 'clean', w.clean === false ? 'warn' : 'ok'),
+            w.clean === null || w.clean === undefined ? badge('unknown', 'muted')
+              : badge(w.clean === false ? 'dirty' : 'clean', w.clean === false ? 'warn' : 'ok'),
             w.ahead ? ` +${w.ahead}` : '', w.behind ? ` -${w.behind}` : ''),
           h('span', { class: 'wt-plans' }, ...plansOf(w.plans)),
           h('span', { class: 'path wt-path' }, w.path))),
@@ -439,7 +440,9 @@
           h('span', { class: 'wt-name' }, name),
           h('span', { class: 'wt-state' }, badge('gone', 'warn')),
           h('span', { class: 'wt-plans' }, ...plansOf(assigned.filter(i => i.worktree.name === name).map(i => i.id))),
-          h('span', { class: 'path wt-path muted' }, assigned.find(i => i.worktree.name === name).worktree.path))));
+          h('span', { class: 'path wt-path muted' }, assigned.find(i => i.worktree.name === name).worktree.path))),
+        folder ? h('div', { class: 'muted wt-folder' }, 'Worktree folder: ', h('span', { class: 'path' }, folder.rel + '/'),
+          ` (${folder.source === 'default' ? 'the default' : folder.source === 'registry' ? 'set on this machine' : 'set in planning.toml'})`) : null);
     }
 
     // ---- order: drag within a lane, or the handle and the arrow keys ---- //
@@ -582,8 +585,17 @@
         return h(inLane ? 'li' : 'div', { class: 'card item-card' }, h('div', {}, it.file), h('div', { class: 'meta' }, badge('cannot be read', 'warn'), ' see planning check'));
       }
       const pct = it.steps.total ? Math.round(100 * it.steps.done / it.steps.total) : 0;
-      const card = h(inLane ? 'li' : 'div', { class: 'card item-card', 'data-id': it.id },
-        h('div', { class: 'card-head' }, inLane ? handle(it) : null, badge(it.kind, 'muted'), h('span', { class: 'id' }, it.id)),
+      const pausable = it.kind === 'plan' && (it.folder === 'todo' || it.folder === 'in-progress');
+      const toggle = pausable ? h('button', { class: 'card-pause' + (it.paused ? ' on' : ''), draggable: 'false',
+        title: it.paused ? 'Paused: let the agent carry on' : 'Pause: the agent finishes the step it is on, then waits',
+        'aria-label': it.paused ? 'Continue' : 'Pause',
+        onclick: async (e) => {
+          e.preventDefault(); e.stopPropagation();
+          try { await api('PUT', `/api/r/${slug}/pause/${it.id}`, { paused: !it.paused }); } catch (err) { toast(err.message); }
+          load();
+        } }, it.paused ? '▶' : '⏸') : null;
+      const card = h(inLane ? 'li' : 'div', { class: 'card item-card' + (it.paused ? ' paused' : ''), 'data-id': it.id },
+        h('div', { class: 'card-head' }, inLane ? handle(it) : null, badge(it.kind, 'muted'), h('span', { class: 'id' }, it.id), toggle),
         h('a', { class: 'title', href: `/r/${slug}/i/${it.id}`, draggable: 'false' }, mdi(it.title)));
       if (it.steps.total) {
         card.append(h('div', { class: 'progress-line' }, h('div', { class: 'progress' }, h('span', { style: null })),
@@ -600,6 +612,7 @@
         chip.title = it.home ? it.home.path : it.worktree.path;
         b.append(chip);
       }
+      if (it.paused) b.append(badge('paused', 'warn'));
       if (it.for_user.length) b.append(badge(`${it.for_user.length} for you`, 'open'));
       if (it.for_agent.length) b.append(badge(`${it.for_agent.length} for the agent`, 'agent'));
       const open = (it.needs || []).filter(n => !n.done);
@@ -792,12 +805,14 @@
       if ((d.risk || []).length) {
         out.push(h('h2', { class: 'reading' }, 'Risks'), h('ul', { class: 'reading' }, d.risk.map(r => h('li', {}, md(r.what), r.mitigation ? h('div', { class: 'muted small' }, md(r.mitigation)) : null))));
       }
-      if ((d.log || []).length) {
+      if ((v.timeline || []).length) out.push(...timelineBlock(v));
+      else if ((d.log || []).length) {
         out.push(h('h2', { class: 'reading' }, 'Log'), h('ul', { class: 'reading' }, d.log.map(l => h('li', {}, h('span', { class: 'mono small' }, l.on), ' ',
           l.step ? h('code', {}, l.step) : null, ' ', mdi(l.text), l.commit ? h('code', {}, ' ' + l.commit) : null))));
       }
 
-      out.push(h('h2', {}, 'Comments on the whole item'), comments('', true, true));
+      // A plan's whole-item comments are its chat, beside it; other items keep them here.
+      if (v.kind !== 'plan') out.push(h('h2', {}, 'Comments on the whole item'), comments('', true, true));
       // The to-do sits beside the article, and wraps under it when narrow.
       main.replaceChildren(h('article', { class: 'article' }, out), h('aside', { class: 'todo-aside' }, todoPanel(v)));
       document.body.classList.toggle('focus', focusOn());
@@ -827,6 +842,7 @@
       const open = s.open || [];
       const later = open.filter(x => x.by === 'user' && !x.ready && !x.ticked);
       const panel = h('section', { class: 'todo card', id: 'todo' });
+      if (v.kind === 'plan' && v.folder !== 'done') panel.append(pauseRow(v));
       panel.append(h('h2', {}, now.length ? `For you now (${now.length})` : 'Nothing waits on you right now'));
       if (now.length) {
         panel.append(h('ul', { class: 'todo-list' }, now.map(x => h('li', {},
@@ -841,22 +857,110 @@
             h('a', { href: '#' + x.id, onclick: jump(x.id) }, h('span', { class: 'mono small' }, x.id)), ' ', mdi(x.title),
             h('span', { class: 'muted small' }, ' — waits on ' + x.waiting_on.join(', '))))));
       }
-      if (open.length) {
-        const agent = open.filter(x => x.by === 'agent').length, mine = open.length - agent;
-        const det = h('details', { class: 'todo-open' }, h('summary', {}, `Not done yet: ${open.length} step${open.length === 1 ? '' : 's'} (${mine} yours, ${agent} the agent's)`));
-        det.append(h('ul', { class: 'todo-list' }, open.map(x => h('li', {},
-          h('a', { href: '#' + x.id, onclick: jump(x.id) }, h('span', { class: 'mono small' }, x.id)), ' ',
-          badge(x.by, x.by), ' ',
-          x.state !== 'open' ? badge(x.state, x.state === 'blocked' ? 'warn' : 'muted') : null, ' ',
-          x.ticked ? badge('you ticked it', 'ok') : null, ' ',
-          x.gate ? badge(x.approval === 'approved' ? 'approved' : 'gate', x.approval === 'approved' ? 'ok' : 'gate') : null, ' ',
-          mdi(x.title),
-          x.waiting_on.length ? h('span', { class: 'muted small' }, ' — waits on ' + x.waiting_on.join(', ')) : (x.by === 'agent' ? h('span', { class: 'muted small' }, ' — ready') : null)))));
-        panel.append(det);
-      } else if (s.steps.total) {
-        panel.append(h('p', { class: 'muted' }, 'Every step is done or dropped.'));
-      }
+      if ((v.data.phase || []).length) panel.append(progress(v));
+      if (v.kind === 'plan') panel.append(chatPanel(v));
+      else if (s.steps.total && !open.length) panel.append(h('p', { class: 'muted' }, 'Every step is done or dropped.'));
       return panel;
+    }
+
+    // Progress beside the plan (p-pw7ft8 s7-1): each phase with done/total and a
+    // bar, its steps with their state and a link to each, the active one marked.
+    // Folded at phone width, where the panel sits above the plan.
+    function progress(v) {
+      const open = new Map((v.summary.open || []).map(x => [x.id, x]));
+      const phases = v.data.phase || [];
+      let done = 0, total = 0;
+      const groups = phases.map(ph => {
+        const steps = ph.step || [];
+        const fin = steps.filter(s => s.state === 'done' || s.state === 'dropped').length;
+        done += fin; total += steps.length;
+        const active = steps.some(s => s.state === 'active');
+        const det = h('details', { class: 'prog-phase' + (active ? ' has-active' : '') + (fin === steps.length ? ' finished' : '') },
+          h('summary', {},
+            h('span', { class: 'prog-title' }, h('span', { class: 'mono small muted' }, ph.id + ' '), mdi(ph.title)),
+            h('span', { class: 'prog-count mono small' }, `${fin}/${steps.length}`),
+            h('span', { class: 'prog-bar', 'aria-hidden': 'true' },
+              h('span', { style: `width:${steps.length ? Math.round(100 * fin / steps.length) : 0}%` }))),
+          h('ul', { class: 'prog-steps' }, steps.map(s => {
+            const o = open.get(s.id) || {};
+            const state = o.ticked && s.state !== 'done' ? 'ticked' : (s.state || 'open');
+            return h('li', { class: 'prog-step ' + state },
+              h('span', { class: 'prog-dot', title: state, 'aria-label': state }),
+              h('a', { href: '#' + s.id, onclick: jump(s.id) }, h('span', { class: 'mono small' }, s.id), ' ', mdi(s.title)),
+              s.state === 'active' ? badge('active', 'open') : null,
+              s.by === 'user' && s.state !== 'done' && s.state !== 'dropped' ? badge('yours', 'user') : null);
+          })));
+        // Open what is being worked on and what is next; finished phases stay folded.
+        if (active || (fin < steps.length && !phases.some(x => (x.step || []).some(s => s.state === 'active')))) det.open = true;
+        return det;
+      });
+      const wrap = h('details', { class: 'prog', id: 'wr-progress' },
+        h('summary', {}, h('h3', {}, 'Progress ', h('span', { class: 'mono small muted' }, `${done}/${total} steps`))),
+        ...groups);
+      wrap.open = !window.matchMedia('(max-width: 900px)').matches;
+      return wrap;
+    }
+
+    // The chat beside a plan (p-pw7ft8, decision `chat`): its whole-plan comments
+    // as a conversation, the agent's replies and what it did under each. The
+    // agent reads it while it works the plan with /work-plan.
+    function localTime(s) {
+      const d = new Date(s || '');
+      return isNaN(d) ? (s || '') : d.toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    }
+
+    function chatPanel(v) {
+      const list = ((v.answers || {}).comments || []).filter(c => !c.on);
+      const log = h('div', { class: 'chat-log' });
+      for (const c of list) {
+        log.append(h('div', { class: 'chat-msg mine' }, h('div', { class: 'chat-meta mono small' }, `${c.id} · ${localTime(c.at)}`), md(c.text)));
+        for (const r of c.replies || []) {
+          log.append(h('div', { class: 'chat-msg agent' }, h('div', { class: 'chat-meta mono small' }, `agent · ${localTime(r.at)}`), md(r.text)));
+        }
+        if (c.resolved) {
+          log.append(h('div', { class: 'chat-msg agent done' }, h('div', { class: 'chat-meta mono small' }, `done · ${localTime(c.resolved.at)}`), md(c.resolved.note || '')));
+        } else if (!(c.replies || []).length) {
+          log.append(h('div', { class: 'chat-wait muted small' }, 'waiting for the agent'));
+        }
+      }
+      const key = 'chat:' + v.id;
+      const ta = draftBox(h('textarea', { rows: 2, placeholder: 'Ask the agent to change the plan, or ask it something…' }), key, '');
+      const send = async () => {
+        if (!ta.value.trim()) return;
+        try { await api('POST', `${base}/comment/${v.id}`, { on: '', text: ta.value }); ta.value = ''; drafts.delete(key); etag = null; load(true); }
+        catch (e) { toast('Not sent: ' + e.message); }
+      };
+      ta.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
+      const box = h('section', { class: 'chat', id: 'wr-chat' },
+        h('h3', {}, 'Chat with the agent'),
+        list.length ? log : h('p', { class: 'muted small' }, 'Ask for a change to this plan. The agent answers while it works the plan with /work-plan.'),
+        ta, h('div', { class: 'row chat-send' }, h('span', { class: 'muted small' }, 'Ctrl+Enter sends'), h('button', { class: 'primary', onclick: send }, 'Send')));
+      requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+      return box;
+    }
+
+    // Pause and Continue (p-pw7ft8, decision `pause`): the agent working the plan
+    // finishes the step it is on, then waits until the plan is continued.
+    function pauseButton(v) {
+      const paused = Boolean(v.summary.paused);
+      return h('button', { class: 'pause-btn' + (paused ? ' primary' : ''), title: paused ? 'Let the agent carry on' : 'The agent finishes the step it is on, then waits',
+        onclick: async () => {
+          try { await api('PUT', `${base}/pause/${v.id}`, { paused: !paused }); } catch (e) { toast(e.message); }
+          load(true);
+        } }, paused ? '▶ Continue' : '⏸ Pause');
+    }
+
+    function pauseRow(v) {
+      const p = v.summary.paused;
+      if (p) {
+        return h('div', { class: 'pause-row paused' },
+          h('div', {}, badge('paused', 'warn'), ' ',
+            h('span', { class: 'small' }, `since ${new Date(p.at).toLocaleString()}. The agent finishes the step it is on, then waits.`)),
+          pauseButton(v));
+      }
+      return h('div', { class: 'pause-row' },
+        h('span', { class: 'muted small' }, 'The agent working this plan carries on until you pause it.'),
+        pauseButton(v));
     }
 
     function planApproval(v) {
@@ -968,8 +1072,27 @@
     }
 
     // The steps whose protocol is open: kept across re-renders, so an open one
-    // follows the agent's new entries as the page reloads.
+    // follows the agent's new entries as the page reloads. An active step's
+    // opens by itself (decision `logs`: live) unless the user closed it.
     const openProtocols = new Set();
+    const closedProtocols = new Set();
+
+    // The plan's timeline (decision `logs`): its [[log]] and every step's notes,
+    // newest first, as the service merges them.
+    function timelineBlock(v) {
+      const rows = v.timeline.map(r => h('li', { class: 'tl-row tl-' + r.kind },
+        h('div', { class: 'tl-head' },
+          h('span', { class: 'mono small muted' }, r.kind === 'log' ? r.day : r.at.slice(0, 16)),
+          r.step ? h('a', { class: 'mono small', href: '#' + r.step, onclick: jump(r.step) }, r.step) : null,
+          badge(r.kind === 'log' ? 'log' : 'note', r.kind === 'log' ? 'ok' : 'muted'),
+          r.commit ? h('code', { class: 'small' }, r.commit) : null),
+        md(r.text)));
+      const more = v.timeline_older ? h('p', { class: 'muted small' },
+        `and ${v.timeline_older} older; each step's protocol has them all.`) : null;
+      return [h('h2', { class: 'reading', id: 'wr-timeline' }, 'Timeline ',
+                h('span', { class: 'h-meta' }, 'the log and every note, newest first')),
+              h('ul', { class: 'timeline' }, rows), more];
+    }
 
     function stepProtocol(s) {
       const p = (view.protocols || {})[s.id];
@@ -978,15 +1101,22 @@
       const when = p.last ? ', last at ' + p.last.slice(11, 16) : '';
       const det = h('details', { class: 'protocol' },
         h('summary', { class: 'small' }, `Protocol (${p.entries} ${p.entries === 1 ? 'entry' : 'entries'}${when})`), body);
+      const live = s.state === 'active';
+      if (live) { det.classList.add('protocol-live'); body.classList.add('following'); }
       async function fill() {
+        // Following: stay at the newest line, unless the reader scrolled up.
+        const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
         try {
           const r = await api('GET', `/api/r/${slug}/protocol/${view.id}/${s.id}`);
           body.replaceChildren(md(r.text, 'protocol-text'));
         } catch (e) { body.replaceChildren(h('p', { class: 'small' }, 'cannot load the protocol: ' + e.message)); }
+        if (live && (atEnd || !body.dataset.seen)) { body.scrollTop = body.scrollHeight; body.dataset.seen = '1'; }
       }
       det.addEventListener('toggle', () => {
-        if (det.open) { openProtocols.add(s.id); fill(); } else openProtocols.delete(s.id);
+        if (det.open) { openProtocols.add(s.id); closedProtocols.delete(s.id); fill(); }
+        else { openProtocols.delete(s.id); if (live) closedProtocols.add(s.id); }
       });
+      if (live && !closedProtocols.has(s.id)) openProtocols.add(s.id);
       if (openProtocols.has(s.id)) { det.open = true; fill(); }
       return det;
     }
@@ -1246,6 +1376,7 @@
       for (const c of list) {
         wrap.append(h('div', { class: 'comment' + (c.resolved ? ' resolved' : '') },
           h('span', { class: 'mono small muted' }, `${c.id} · ${c.at}`), ' ', c.text,
+          ...(c.replies || []).map(r => h('div', { class: 'small reply' }, '↳ ', mdi(r.text))),
           c.resolved ? h('div', { class: 'small' }, '✓ handled: ' + (c.resolved.note || '')) : null));
       }
       const ckey = 'comment:' + on;
@@ -1293,6 +1424,7 @@
         focusOn() ? 'Show everything' : 'Only what is open');
       const todoBtn = h('button', { onclick: () => document.getElementById('todo').scrollIntoView({ behavior: 'smooth' }) }, 'To-do');
       bar.replaceChildren(h('div', { class: 'in' }, h('span', { class: 'progress-text' }, parts.join(' · ') || 'Nothing open'),
+        v.kind === 'plan' && v.folder !== 'done' ? pauseButton(v) : null,
         todoBtn, focusBtn, h('button', { class: 'primary', onclick: copyAnswers }, 'Copy answers')));
       bar.hidden = false;
     }

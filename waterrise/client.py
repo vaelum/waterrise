@@ -30,7 +30,7 @@ from pathlib import Path
 from . import dirs, lock
 from .errors import WaterriseError
 
-API = 1
+API = 2          # 2: PUT /api/repos/<slug>/worktrees
 DEFAULT_PORT = 8765
 SERVICE = "waterrise"
 HEADER = "X-Waterrise"
@@ -342,6 +342,15 @@ def set_home(running: Running, slug: str, home: str, planning: Path) -> dict:
                         {"home": home, "planning": str(planning)}, auth=True)
     if status != 200 or not isinstance(body, dict):
         raise WaterriseError(f"the planning service refused to move {slug} to {home}: {body}")
+    return body
+
+
+def set_worktrees(running: Running, slug: str, value: str | None) -> dict:
+    """This machine's worktree folder for a project; None removes it."""
+    status, body = call(running.port, "PUT", f"/api/repos/{slug}/worktrees", {"worktrees": value}, auth=True)
+    if status != 200 or not isinstance(body, dict):
+        raise WaterriseError(f"the planning service refused the worktree folder for {slug}: "
+                             f"{body.get('error') if isinstance(body, dict) else body}")
     return body
 
 

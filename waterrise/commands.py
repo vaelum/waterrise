@@ -21,14 +21,14 @@ from .context import Project as Ctx
 from .context import locate, prog, short
 from .errors import WaterriseError
 from . import answers as answers_mod
-from . import central
+from . import central, layout
 from . import check as check_mod
 from . import client
 from . import convert as convert_mod
 from . import folder as folder_mod
 from . import install as install_mod
 from . import worktrees as worktrees_mod
-from .state import (DONE_STEP, decision_local, decision_state, plan_approval, step_approval,
+from .state import (DONE_STEP, decision_local, decision_state, paused, plan_approval, step_approval,
                     summarize)
 from .types import (CONFIG_FILE, FORMAT, ID_RE, KINDS, NOTES_FOLDER, REPORTS_FOLDER, SCHEMA_FOLDER, STATE_FOLDERS,
                     json_schema, jsonable, new_id)
@@ -147,7 +147,7 @@ def cmd_init(ctx: Ctx, args) -> int:
 def _ignore_worktrees(ctx: Ctx) -> None:
     path = worktrees_mod.ensure_ignored(ctx)
     if path is not None:
-        ui.note(f"{worktrees_mod.IGNORE_RULE} is now ignored, in {ctx.disp(path)}"
+        ui.note(f"{worktrees_mod.ignore_rule(ctx.root)} is now ignored, in {ctx.disp(path)}"
                 + ("" if ctx.home == "central" else "; the change is not committed"))
 
 
@@ -278,6 +278,10 @@ def _status_lines(f: folder_mod.Folder, it: folder_mod.Item, root: Path) -> list
     for line in (_worktree_line(root, f.assignment(it.id)), _home_line(f, it)):
         if line:
             lines.append(f"  {line}")
+    p = paused(ans)
+    if p:
+        lines.append(f"  paused in the page since {p['at']}: finish the step you are on, then wait "
+                     "until it is continued")
     for what, local, text in s.for_user:
         lines.append(f"  for {f.user}:  {what} {local}  {text}".rstrip())
     for what, local, text in s.for_agent:
@@ -311,6 +315,7 @@ def cmd_status(ctx: Ctx, args) -> int:
         branch = next((x.branch for x in worktrees_mod.read(ctx.root) if x.main), None)
         ui.plain(f"in the worktree {w.name if w else ctx.checkout.name}, {ctx.checkout}; "
                  f"the main checkout is {ctx.root}" + (f", on {branch}" if branch else ""))
+        ui.plain(ui.dim(f"worktree folder: {layout.where_set(worktrees_mod.folder_of(ctx.root))}"))
         if w:
             items.sort(key=lambda i: f.worktree_of(i) != w.name)
     if not args.id:
@@ -586,6 +591,29 @@ def cmd_resolve(ctx: Ctx, args) -> int:
     return 0
 
 
+def cmd_reply(ctx: Ctx, args) -> int:
+    """The agent's answer under a comment, shown with it in the page's chat. It
+    does not mark the comment handled; `resolve` does, once the work is done."""
+    f = _typed(ctx)
+    it = _item(f, args.id)
+    ans = f.answers(it.id)
+    if not any(c.get("id") == args.comment for c in ans.get("comments", [])):
+        raise WaterriseError(f"{it.id} has no comment {args.comment}", hint=f"{prog()} status {it.id}")
+    text = " ".join(args.text).strip() if isinstance(args.text, list) else str(args.text or "").strip()
+    if not text:
+        raise WaterriseError("a reply needs text")
+    if ctx.would(f"reply to comment {args.comment} of {it.id}"):
+        return 0
+
+    def change(d: dict) -> None:
+        for c in d.get("comments", []):
+            if c.get("id") == args.comment:
+                c.setdefault("replies", []).append({"text": text, "at": answers_mod.now(), "by": "agent"})
+    answers_mod.update(f.answers_path(it.id), it.id, change)
+    ui.ok(f"{it.id} {args.comment}", "answered")
+    return 0
+
+
 def _agent_step(f: folder_mod.Folder, item_id: str, step: str) -> folder_mod.Item:
     """The plan and its agent step a protocol belongs to, or an error naming what is wrong."""
     it = _item(f, item_id)
@@ -826,7 +854,7 @@ def cmd_assign(ctx: Ctx, args) -> int:
 
 
 def cmd_worktree_add(ctx: Ctx, args) -> int:
-    if ctx.would(f"add the worktree {worktrees_mod.FOLDER}/{args.name}"):
+    if ctx.would(f"add the worktree {worktrees_mod.folder_of(ctx.root).rel}/{args.name}"):
         return 0
     f = plan = None
     if args.plan:
@@ -849,18 +877,22 @@ def cmd_worktree_add(ctx: Ctx, args) -> int:
 def cmd_worktree_list(ctx: Ctx, args) -> int:
     f = folder_mod.read(planning_dir(ctx), ctx.git_root or ctx.root)
     rows = []
-    for w in worktrees_mod.read(ctx.root):
-        if not (w.assignable or args.all):
-            continue
+    shown = [w for w in worktrees_mod.read(ctx.root) if w.assignable or args.all]
+    states = worktrees_mod.states(ctx.root, shown)
+    for w in shown:
         plans = worktrees_mod.plans_of(f, w.name) if f.exists and w.assignable else []
         rows.append({"name": w.name, "path": str(w.path), "branch": w.branch, "assignable": w.assignable,
-                     "here": w.path == ctx.checkout, **worktrees_mod.state(ctx.root, w),
+                     "here": w.path == ctx.checkout, **states[w.path],
                      "plans": [p.id for p in plans]})
     if args.json:
         _print_json(rows)
         return 0
+    s = worktrees_mod.folder_of(ctx.root)
+    ui.plain(ui.dim(f"worktree folder: {layout.where_set(s)}, {s.path}"))
+    if s.problem:
+        ui.warn(s.problem)
     for r in rows:
-        state = "clean" if r["clean"] else "dirty"
+        state = "unknown" if r["clean"] is None else "clean" if r["clean"] else "dirty"
         apart = "".join((f" +{r['ahead']}" if r["ahead"] else "", f" -{r['behind']}" if r["behind"] else ""))
         ui.plain(f"{'*' if r['here'] else ' '} {r['name']:20} {r['branch'] or '(detached)':24} {state}{apart}  {r['path']}"
                  + (f"  {', '.join(r['plans'])}" if r["plans"] else "")
@@ -921,12 +953,55 @@ def cmd_projects(ctx: Ctx, args) -> int:
         return 0
     if action == "home":
         return _projects_home(ctx, args)
+    if action == "worktrees":
+        return _projects_worktrees(ctx, args)
     if action == "remove":
         target = args.path or str(ctx.root)
         entry = next((r for r in client.registry() if r.get("slug") == target), None)
         args.path = entry["path"] if entry else target
         return cmd_forget(ctx, args)
     raise WaterriseError(f"unknown action {action}")
+
+
+def _projects_worktrees(ctx: Ctx, args) -> int:
+    """`projects worktrees [SLUG|PATH] [DIR] [--default]`: this machine's worktree
+    folder for a project, over its planning.toml; without DIR, the one in use."""
+    if args.to is None and args.path is not None and not args.default:
+        # `projects worktrees DIR`, for this project, unless it names a project
+        rows = client.registry()
+        named = any(r.get("slug") == args.path for r in rows) or \
+            any(Path(r["path"]) == Path(args.path).expanduser().resolve() for r in rows if Path(args.path).is_absolute())
+        if not named:
+            args.path, args.to = None, args.path
+    rows = client.registry()
+    want = args.path or str(ctx.root)
+    entry = next((r for r in rows if r.get("slug") == want), None) or \
+        next((r for r in rows if Path(r["path"]) == _project_path(Path(want).expanduser().resolve())), None)
+    if args.to is None and not args.default:
+        root = Path(entry["path"]) if entry else ctx.root
+        s = layout.setting(root, Path(entry["planning"]) if entry else ctx.planning)
+        if args.json:
+            _print_json({"worktrees": s.rel, "path": str(s.path), "source": s.source, "problem": s.problem})
+            return 0
+        ui.ok(layout.where_set(s), str(s.path))
+        if s.problem:
+            ui.warn(s.problem)
+        return 0
+    if args.to is not None and args.default:
+        raise WaterriseError("give a folder or --default, not both")
+    if entry is None:
+        raise WaterriseError(f"{want} is not a registered project; this machine's setting lives in its registry",
+                             hint=f"{prog()} projects add, or set worktrees in planning.toml")
+    if args.to is not None and (why := layout.invalid(args.to)):
+        raise WaterriseError(f"{args.to!r} {why}")
+    value = None if args.default else args.to.strip()
+    if ctx.would(f"set {entry['slug']}'s worktree folder on this machine to {value or 'its planning.toml or the default'}"):
+        return 0
+    running, _ = client.ensure(args.port)
+    client.set_worktrees(running, entry["slug"], value)
+    s = layout.setting(Path(entry["path"]), Path(entry["planning"]))
+    ui.ok(entry["slug"], f"worktrees in {layout.where_set(s)}: {s.path}")
+    return 0
 
 
 def _projects_home(ctx: Ctx, args) -> int:
@@ -1004,6 +1079,9 @@ def nodes() -> list[Node]:
         Node("gate", "exit 0 only if the step (or the plan) is approved and unchanged since",
              args=[arg("id"), arg("step", nargs="?", help="the gated step; without it, the plan")],
              func=cmd_gate),
+        Node("reply", "answer a user's comment, or a message in the page's chat, without marking it handled",
+             args=[arg("id"), arg("comment", help="c1, c2, …"), arg("text", nargs="+", help="the answer")],
+             func=cmd_reply),
         Node("resolve", "mark a user's comment as handled",
              args=[arg("id"), arg("comment", help="c1, c2, …"),
                    arg("--note", required=True, help="what was done about it")],
@@ -1032,10 +1110,13 @@ def nodes() -> list[Node]:
              func=cmd_service),
         Node("forget", "unregister a repository (default: this one)",
              args=[arg("path", nargs="?")], func=cmd_forget),
-        Node("projects", "the registered projects and where each plans: list, add, remove, home",
-             args=[arg("action", nargs="?", choices=("list", "add", "remove", "home")),
+        Node("projects", "the registered projects and where each plans: list, add, remove, home, worktrees",
+             args=[arg("action", nargs="?", choices=("list", "add", "remove", "home", "worktrees")),
                    arg("path", nargs="?", help="the project (default: this one); for remove and home, its slug too"),
-                   arg("to", nargs="?", metavar="HOME", help="for home: repo or central"),
+                   arg("to", nargs="?", metavar="HOME|DIR",
+                       help="for home: repo or central; for worktrees: the folder, relative to the main checkout"),
+                   arg("--default", action="store_true",
+                       help="for worktrees: drop this machine's setting, so planning.toml's (or worktrees/) counts"),
                    arg("--home", choices=central.HOMES,
                        help="where its plans live: repo (<project>/planning/) or central (default repo)"),
                    arg("--name", help="its name in the pages (default: butler.toml's, or the directory's)"),
@@ -1046,7 +1127,8 @@ def nodes() -> list[Node]:
              args=[arg("id"), arg("name", nargs="?", help="main, or a worktree's name"),
                    arg("--none", action="store_true", help="it can be worked on anywhere")],
              func=cmd_assign),
-        Node("worktree", f"this project's worktrees, in {worktrees_mod.FOLDER}/ at the top of its main checkout",
+        Node("worktree", "this project's worktrees, in its worktree folder (worktrees/ unless planning.toml or "
+                         "projects worktrees says otherwise)",
              children=[
                  Node("add", "make one; its branch defaults to its name",
                       args=[arg("name"), arg("--branch", help="the branch (default: NAME, the existing one if any)"),

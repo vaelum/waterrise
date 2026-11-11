@@ -240,3 +240,45 @@ def summaries(planning: Path, plan_id: str) -> dict[str, dict]:
         if s is not None:
             out[p.stem] = s
     return out
+
+
+# ---- every note, for a plan's timeline (p-pw7ft8 s7-2) --------------------------- #
+
+_NOTES: dict[Path, tuple[tuple, list[dict]]] = {}
+NOTE_CHARS = 1200       # a note longer than this is cut in the timeline; the protocol has it all
+
+
+def _file_notes(path: Path) -> list[dict]:
+    """The notes in one protocol, oldest first, kept by its size and mtime:
+    protocols only grow, and the page asks on every reload."""
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    stamp = (st.st_size, st.st_mtime_ns)
+    hit = _NOTES.get(path)
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    text = path.read_text(encoding="utf-8", errors="replace")
+    heads = list(HEADING.finditer(text))
+    out = []
+    for i, m in enumerate(heads):
+        if m.group(2) != "note":
+            continue
+        end = heads[i + 1].start() if i + 1 < len(heads) else len(text)
+        body = text[m.end():end].strip()
+        out.append({"at": m.group(1), "step": path.stem,
+                    "text": body if len(body) <= NOTE_CHARS else body[:NOTE_CHARS].rstrip() + " …"})
+    if len(_NOTES) > 5000:
+        _NOTES.clear()
+    _NOTES[path] = (stamp, out)
+    return out
+
+
+def notes(planning: Path, plan_id: str) -> list[dict]:
+    """Every note of a plan's steps, oldest first."""
+    base = planning / FOLDER / plan_id
+    if not base.is_dir():
+        return []
+    out = [n for p in sorted(base.glob("*.md")) for n in _file_notes(p)]
+    return sorted(out, key=lambda n: n["at"])
