@@ -211,9 +211,31 @@ def _shell(argv: list[str]) -> str:
 HEADING = re.compile(r"^## (\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) (note|run)$", re.M)
 
 
+_SUMMARIES: dict[Path, tuple[tuple, dict]] = {}
+
+
 def summary(path: Path) -> dict | None:
     """How many entries a protocol has, when the last one was, and its last
-    note's first lines: what the page shows before it is opened."""
+    note's first lines: what the page shows before it is opened. Kept by size
+    and mtime: a plan's page asks for every protocol on every reload."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    stamp = (st.st_size, st.st_mtime_ns)
+    hit = _SUMMARIES.get(path)
+    if hit is not None and hit[0] == stamp:
+        return dict(hit[1])
+    out = _summary(path)
+    if out is not None:
+        if len(_SUMMARIES) > 5000:
+            _SUMMARIES.clear()
+        _SUMMARIES[path] = (stamp, out)
+        out = dict(out)
+    return out
+
+
+def _summary(path: Path) -> dict | None:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:

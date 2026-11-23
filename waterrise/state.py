@@ -20,8 +20,9 @@ DONE_STEP = ("done", "dropped")
 # ---- dependencies ------------------------------------------------------------- #
 
 def satisfied(ref: str, item: Item, ids: dict | None = None) -> bool:
-    """Is what `ref` names finished: a step done, a phase's steps all done or
-    dropped, a decision resolved, a plan in done/? Without `ids` (the folder's
+    """Is what `ref` names finished: a step done or dropped, a phase's steps all
+    done or dropped, a decision resolved, a plan in done/? A dropped step will
+    never happen, so it holds nothing up, as it already did not in a phase. Without `ids` (the folder's
     items by id), a reference into another item counts as finished: it cannot
     be looked at, and should not hold anything up on a page."""
     if "/" in ref or ID_RE.match(ref):
@@ -41,7 +42,7 @@ def satisfied(ref: str, item: Item, ids: dict | None = None) -> bool:
     if node is None:
         return False
     if kind == "step":
-        return node.get("state") == "done"
+        return node.get("state") in DONE_STEP
     if kind == "phase":
         return all(s.get("state") in DONE_STEP for s in node.get("step", []))
     if kind == "decision":
@@ -375,6 +376,15 @@ def summarize(item: Item, ans: dict, *, plan_approval_required: bool = True,
             elif a.status == "disapproved":
                 s.for_agent.append(("disapproved", sid, f"{step.get('title', '')}: drop it or rewrite it"
                                     + (f"; note: {a.note}" if a.note else "")))
+        elif step.get("gate") and state == "done":
+            # Done, but never answered, or its text changed after the approval:
+            # check wants an answer, and the page lets the user give it.
+            a = step_approval(step, ans)
+            if a.status == "none":
+                s.for_user.append(("approval", sid, f"{step.get('title', '')} (done without your approval)"))
+            elif a.status == "stale":
+                s.for_user.append(("approval", sid, f"{step.get('title', '')} (done; changed since your "
+                                                    f"{a.verdict} answer)"))
 
     if plan_approval_due(item, ans, plan_approval_required):
         pa = plan_approval(item, ans)

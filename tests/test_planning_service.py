@@ -325,7 +325,16 @@ def test_one_stream_for_every_tab_names_the_repository_that_changed(server, repo
     assert next_event()[0] == "hello"
     time.sleep(0.2)
     put(repo, "draft/a.toml", plan_text().replace('title = "Monitoring"', 'title = "Monitoring, renamed"'))
-    assert next_event() == ("change", {"index": True, "slugs": ["demo"]})
+    assert next_event() == ("change", {"index": True, "slugs": ["demo"], "grew": []})
+    # A protocol that only grows (an agent's run, a line at a time) is said apart:
+    # a plan's page follows it at a slower pace, and the index not at all.
+    proto = repo / "planning" / "protocols" / "p-4k7x2m"
+    proto.mkdir(parents=True)
+    (proto / "s1-1.md").write_text("start\n", encoding="utf-8")
+    assert next_event() == ("change", {"index": True, "slugs": ["demo"], "grew": []}), "a new protocol shows"
+    with (proto / "s1-1.md").open("a", encoding="utf-8") as fh:
+        fh.write("one more line\n")
+    assert next_event() == ("change", {"index": False, "slugs": [], "grew": ["demo"]})
     conn.close()
 
 

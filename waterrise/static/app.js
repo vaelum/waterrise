@@ -27,7 +27,7 @@
       else if (v === true) el.setAttribute(k, '');
       else el.setAttribute(k, String(v));
     }
-    for (const kid of kids.flat()) {
+    for (const kid of kids.flat(Infinity)) {
       if (kid === null || kid === undefined || kid === false) continue;
       el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
     }
@@ -113,8 +113,38 @@
   // opens six connections per host, and a stream per tab left the sixth tab
   // none for its own requests. Where there is no SharedWorker, a tab opens its
   // own stream for just its page.
-  let watcher = null;  // { fn, scope, slug }: what this page reloads, on which changes
+  let watcher = null;  // { raw, fn, scope, slug }: what this page reloads, on which changes
   let shared = null;   // this tab's port to the shared worker
+
+  // A page's reload on a change, one at a time. While an agent's run streams
+  // into a protocol, the stream says "changed" every half second; a reload per
+  // event piled requests up and kept the page redrawing (79% of the main thread,
+  // 2026-11-18). Now a change that comes while a reload runs is done once after
+  // it, none starts sooner than GAP after the last ended, and a protocol that
+  // only grew waits SLOW. The first change after a quiet spell loads at once.
+  const GAP = 1000, SLOW = 4000;
+  function calm(fn) {
+    let running = false, last = 0, timer = null, due = Infinity, queued = null;
+    function request(gap) {
+      if (running) { queued = Math.min(queued === null ? Infinity : queued, gap); return; }
+      const when = Math.max(Date.now(), last + gap);
+      if (timer && due <= when) return;  // one is coming as soon or sooner
+      clearTimeout(timer);
+      due = when;
+      timer = setTimeout(go, when - Date.now());
+    }
+    async function go() {
+      timer = null; due = Infinity; running = true;
+      try { await fn(); } catch (e) { /* the page says why */ }
+      finally {
+        running = false; last = Date.now();
+        if (queued !== null) { const g = queued; queued = null; request(g); }
+      }
+    }
+    const now = () => request(GAP);
+    now.slow = () => request(SLOW);
+    return now;
+  }
 
   function heard(msg) {
     if (msg.type === 'hello') {
@@ -122,7 +152,9 @@
       if (msg.version && VERSION && msg.version !== VERSION) location.reload();
     } else if (msg.type === 'change') {
       if (!watcher) return;
-      if (watcher.scope === 'repo' ? (msg.slugs || []).includes(watcher.slug) : msg.index) watcher.fn();
+      if (watcher.scope !== 'repo') { if (msg.index) watcher.fn(); }
+      else if ((msg.slugs || []).includes(watcher.slug)) watcher.fn();
+      else if ((msg.grew || []).includes(watcher.slug)) watcher.fn.slow();
     } else if (msg.type === 'error') {
       say('live updates paused; retrying', true);
     } else if (msg.type === 'open') {
@@ -142,13 +174,18 @@
       try { v = JSON.parse(e.data).version; } catch (err) { v = ''; }
       heard({ type: 'hello', version: v });
     });
-    stream.addEventListener('change', () => watcher && watcher.fn());
+    stream.addEventListener('change', e => {
+      if (!watcher) return;
+      let d = {};
+      try { d = JSON.parse(e.data) || {}; } catch (err) { d = {}; }
+      if (d.grew === true) watcher.fn.slow(); else watcher.fn();
+    });
     stream.onerror = () => heard({ type: 'error' });
     stream.onopen = () => heard({ type: 'open' });
   }
 
   function watch(fn, scope, slug) {
-    watcher = { fn, scope, slug };
+    watcher = { raw: fn, fn: calm(fn), scope, slug };
     if (shared) return;
     if (!window.SharedWorker || !VERSION) return ownStream();
     try {
@@ -170,7 +207,7 @@
     if (stream) { stream.close(); stream = null; }
   });
   window.addEventListener('pageshow', (e) => {
-    if (e.persisted && watcher) watch(watcher.fn, watcher.scope, watcher.slug);
+    if (e.persisted && watcher) watch(watcher.raw, watcher.scope, watcher.slug);
   });
 
   function typing() {
@@ -674,16 +711,62 @@
     }
     const base = `/api/r/${slug}`;
 
+    // A re-render must leave the reader where they are. Every fold keeps the
+    // state it has on screen: its default counts once, when it first appears.
+    const folds = new Map();
+    function fold(det, key, def) {
+      det.open = folds.has(key) ? folds.get(key) : !!def;
+      folds.set(key, det.open);
+      det.addEventListener('toggle', () => folds.set(key, det.open));
+      return det;
+    }
+    // Scroll positions of the boxes that scroll by themselves, by key: where the
+    // reader was, and whether that was the end (a box that follows stays there).
+    const scrolls = new Map();
+    const afterRender = [];
+    function keepScroll(el, key, follow) {
+      el.addEventListener('scroll', () => scrolls.set(key,
+        { top: el.scrollTop, atEnd: el.scrollHeight - el.scrollTop - el.clientHeight < 40 }));
+      const place = () => {
+        const m = scrolls.get(key);
+        if (follow && (!m || m.atEnd)) el.scrollTop = el.scrollHeight;
+        else if (m) el.scrollTop = m.top;
+      };
+      afterRender.push(place);
+      return place;
+    }
+    // The first thing with an id that is on screen, and where it sits: after a
+    // re-render the page is scrolled so that it sits there again, whatever
+    // grew or shrank above it.
+    function anchor() {
+      for (const el of main.querySelectorAll('[id]')) {
+        const r = el.getBoundingClientRect();
+        if (r.bottom > 0 && (r.width || r.height)) return { id: el.id, top: r.top };
+      }
+      return null;
+    }
+    let drawn = false;
+    const wasActive = new Set();
+
+    // `seq`: a reload that started later wins, whichever answer comes first.
+    // `lastText`: what was drawn; a protocol's new lines change the ETag but
+    // mostly nothing on this page, and an unchanged answer is not drawn again.
+    let seq = 0, lastText = null;
     async function load(force) {
-      let r;
+      const mine = ++seq;
+      let r, text;
       try {
         r = await fetch(`${base}/item/${id}`, { cache: 'no-store', headers: etag && !force ? { 'If-None-Match': etag } : {} });
-      } catch (e) { say('the service does not answer', true); return; }
+        if (r.ok) text = await r.text();
+      } catch (e) { if (mine === seq) say('the service does not answer', true); return; }
+      if (mine !== seq) return;
       if (r.status === 304) { say(''); return; }
       if (!r.ok) { say('HTTP ' + r.status, true); if (r.status === 404) main.replaceChildren(h('p', {}, 'No such item. It may have been deleted.')); return; }
       etag = r.headers.get('ETag');
-      view = await r.json();
       say('');
+      if (text === lastText && !force) return;
+      lastText = text;
+      view = JSON.parse(text);
       if (typing()) { pendingRender = true; return; }
       render();
     }
@@ -731,7 +814,7 @@
       const kv = [];
       for (const key of ['needs', 'context', 'related']) {
         // A decision's `context` is prose, shown on its card; only lists are references.
-        if (Array.isArray(d[key]) && d[key].length) kv.push(h('div', { class: 'kv' }, key + ': ', ...d[key].map((x, i) => [i ? ', ' : '', h('code', {}, x)])));
+        if (Array.isArray(d[key]) && d[key].length) kv.push(h('div', { class: 'kv' }, key + ': ', ...refList(d[key])));
       }
       if ((d.touches || []).length) kv.push(h('div', { class: 'kv' }, 'touches: ', ...d.touches.map((x, i) => [i ? ', ' : '', h('code', {}, x)])));
       if (d.created) kv.push(h('div', { class: 'kv' }, `created ${d.created} · updated ${d.updated}`));
@@ -764,9 +847,9 @@
       if ((d.section || []).length) {
         out.push(h('h2', { class: v.kind === 'note' ? '' : 'reading' }, v.kind === 'note' ? 'Sections' : 'Design'));
         d.section.forEach((s, i) => {
-          const det = h('details', { class: 'section card' + (v.kind === 'note' ? '' : ' reading'), id: s.id || null, open: v.kind === 'note' || null },
+          const det = h('details', { class: 'section card' + (v.kind === 'note' ? '' : ' reading'), id: s.id || null },
             h('summary', {}, s.title), md(s.body), s.id ? comments(s.id) : null);
-          out.push(det);
+          out.push(fold(det, 'section:' + (s.id || i), v.kind === 'note'));
         });
       }
 
@@ -796,7 +879,7 @@
             h('h3', {}, badge(f.severity, f.severity === 'critical' || f.severity === 'high' ? 'gate' : 'muted'), badge(f.state || 'open', (f.state || 'open') === 'open' ? 'open' : 'ok'), mdi(f.title)),
             h('div', { class: 'kv' }, f.id + (f.area ? ' · ' + f.area : '') + (f.to ? ' · to ' + f.to : '')),
             f.details ? md(f.details) : null,
-            f.evidence ? h('details', {}, h('summary', { class: 'small' }, 'Evidence'), md(f.evidence)) : null,
+            f.evidence ? fold(h('details', {}, h('summary', { class: 'small' }, 'Evidence'), md(f.evidence)), 'evidence:' + f.id, false) : null,
             f.reason ? h('p', { class: 'small muted' }, 'Reason: ' + f.reason) : null,
             comments(f.id)));
         }
@@ -814,11 +897,23 @@
       // A plan's whole-item comments are its chat, beside it; other items keep them here.
       if (v.kind !== 'plan') out.push(h('h2', {}, 'Comments on the whole item'), comments('', true, true));
       // The to-do sits beside the article, and wraps under it when narrow.
-      main.replaceChildren(h('article', { class: 'article' }, out), h('aside', { class: 'todo-aside' }, todoPanel(v)));
+      const at = drawn ? anchor() : null, y = window.scrollY;
+      const oldAside = main.querySelector('.todo-aside'), asideTop = oldAside ? oldAside.scrollTop : 0;
+      afterRender.length = 0;
+      const aside = h('aside', { class: 'todo-aside' }, todoPanel(v));
+      main.replaceChildren(h('article', { class: 'article' }, out), aside);
+      aside.scrollTop = asideTop;
+      for (const f of afterRender) f();
+      if (drawn) {
+        const t = at && document.getElementById(at.id);
+        if (t) window.scrollBy(0, t.getBoundingClientRect().top - at.top);
+        else window.scrollTo(window.scrollX, y);
+      }
+      drawn = true;
       document.body.classList.toggle('focus', focusOn());
       renderBar(v, decisions, ans);
       if (review.el.open) drawReview();
-      if (location.hash && !render.scrolled) { const t = document.getElementById(location.hash.slice(1)); if (t) t.scrollIntoView(); render.scrolled = true; }
+      if (location.hash && !render.scrolled) { const t = document.getElementById(decodeURIComponent(location.hash.slice(1))); if (t) reveal(t); render.scrolled = true; }
     }
 
     // What the user has to do, and what is not done yet, in one place at the
@@ -836,6 +931,59 @@
         t.classList.remove('flash'); void t.offsetWidth; t.classList.add('flash');
       };
     }
+    // A reference (in `needs`, `context`, `related`, "waits on") as a link: a
+    // step, phase or decision of this item jumps there, and Back returns to
+    // where the reader was; `p-…` or `p-…/s1-2` opens that item at that place.
+    const ITEM_ID = /^[pdrnh]-[0-9a-hjkmnp-tv-z]{6}$/;
+    function refTarget(local) {
+      const d = view.data || {};
+      for (const ph of d.phase || []) {
+        const steps = ph.step || [];
+        if (ph.id === local) return { title: ph.title, done: steps.length > 0 && steps.every(s => s.state === 'done' || s.state === 'dropped') };
+        const s = steps.find(x => x.id === local);
+        if (s) return { title: s.title, done: s.state === 'done' || s.state === 'dropped', state: s.state || 'open' };
+      }
+      const dec = (d.decision || []).find(x => x.id === local);
+      if (dec) return { title: dec.question, done: (dec.resolved || []).length > 0 };
+      return null;
+    }
+    function reveal(t) {
+      for (let p = t.parentElement; p; p = p.parentElement) if (p.tagName === 'DETAILS') p.open = true;
+      if (t.tagName === 'DETAILS') t.open = true;
+      t.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      t.classList.remove('flash'); void t.offsetWidth; t.classList.add('flash');
+    }
+    function goTo(local) {
+      return (e) => {
+        const t = document.getElementById(local);
+        if (!t) return;                   // not on the page: the browser's own way
+        e.preventDefault();
+        // Where the reader is, kept on the entry they leave: Back returns there.
+        history.replaceState(Object.assign({}, history.state, { y: window.scrollY }), '');
+        history.pushState({ at: local }, '', '#' + local);
+        reveal(t);
+      };
+    }
+    window.addEventListener('popstate', (e) => {
+      const st = e.state || {};
+      if (typeof st.y === 'number') window.scrollTo({ top: st.y, behavior: 'smooth' });
+      else if (st.at && document.getElementById(st.at)) reveal(document.getElementById(st.at));
+    });
+    function refLink(ref) {
+      ref = String(ref);
+      const cut = ref.indexOf('/');
+      const head = cut < 0 ? ref : ref.slice(0, cut), rest = cut < 0 ? '' : ref.slice(cut + 1);
+      if (ITEM_ID.test(head) && head !== view.id) {
+        return h('a', { class: 'ref mono', href: `/r/${slug}/i/${head}` + (rest ? '#' + encodeURIComponent(rest) : ''), title: 'open ' + ref }, ref);
+      }
+      const local = ITEM_ID.test(head) ? rest : ref;
+      const t = local ? refTarget(local) : null;
+      if (!t) return h('code', {}, ref);
+      return h('a', { class: 'ref mono' + (t.done ? ' ref-done' : ''), href: '#' + local, onclick: goTo(local),
+                      title: (t.title || local) + (t.state ? ` (${t.state})` : t.done ? ' (done)' : '') }, ref);
+    }
+    function refList(refs) { return refs.map((x, i) => [i ? ', ' : '', refLink(x)]); }
+
     function todoPanel(v) {
       const s = v.summary, user = v.user || 'you';
       const now = s.for_user || [];
@@ -855,7 +1003,7 @@
         panel.append(h('h3', {}, `Coming up for you (${later.length})`),
           h('ul', { class: 'todo-list' }, later.map(x => h('li', {},
             h('a', { href: '#' + x.id, onclick: jump(x.id) }, h('span', { class: 'mono small' }, x.id)), ' ', mdi(x.title),
-            h('span', { class: 'muted small' }, ' — waits on ' + x.waiting_on.join(', '))))));
+            h('span', { class: 'muted small' }, ' — waits on ', ...refList(x.waiting_on))))));
       }
       if ((v.data.phase || []).length) panel.append(progress(v));
       if (v.kind === 'plan') panel.append(chatPanel(v));
@@ -891,14 +1039,16 @@
               s.by === 'user' && s.state !== 'done' && s.state !== 'dropped' ? badge('yours', 'user') : null);
           })));
         // Open what is being worked on and what is next; finished phases stay folded.
-        if (active || (fin < steps.length && !phases.some(x => (x.step || []).some(s => s.state === 'active')))) det.open = true;
-        return det;
+        // After that the reader's folds stand; only a phase that starts opens itself.
+        const key = 'progress:' + ph.id;
+        if (active && !wasActive.has(ph.id)) folds.delete(key);
+        if (active) wasActive.add(ph.id); else wasActive.delete(ph.id);
+        return fold(det, key, active || (fin < steps.length && !phases.some(x => (x.step || []).some(s => s.state === 'active'))));
       });
       const wrap = h('details', { class: 'prog', id: 'wr-progress' },
         h('summary', {}, h('h3', {}, 'Progress ', h('span', { class: 'mono small muted' }, `${done}/${total} steps`))),
         ...groups);
-      wrap.open = !window.matchMedia('(max-width: 900px)').matches;
-      return wrap;
+      return fold(wrap, 'progress', !window.matchMedia('(max-width: 900px)').matches);
     }
 
     // The chat beside a plan (p-pw7ft8, decision `chat`): its whole-plan comments
@@ -935,7 +1085,8 @@
         h('h3', {}, 'Chat with the agent'),
         list.length ? log : h('p', { class: 'muted small' }, 'Ask for a change to this plan. The agent answers while it works the plan with /work-plan.'),
         ta, h('div', { class: 'row chat-send' }, h('span', { class: 'muted small' }, 'Ctrl+Enter sends'), h('button', { class: 'primary', onclick: send }, 'Send')));
-      requestAnimationFrame(() => { log.scrollTop = log.scrollHeight; });
+      // At the newest message, unless the reader scrolled up to read.
+      requestAnimationFrame(keepScroll(log, 'chat', true));
       return box;
     }
 
@@ -1076,6 +1227,9 @@
     // opens by itself (decision `logs`: live) unless the user closed it.
     const openProtocols = new Set();
     const closedProtocols = new Set();
+    // Each protocol's text as last loaded: a re-render shows it at once, at its
+    // full height, instead of a "loading…" line that makes the page jump.
+    const protocolText = new Map();
 
     // The plan's timeline (decision `logs`): its [[log]] and every step's notes,
     // newest first, as the service merges them.
@@ -1097,20 +1251,23 @@
     function stepProtocol(s) {
       const p = (view.protocols || {})[s.id];
       if (!p) return null;
-      const body = h('div', { class: 'protocol-body' }, h('p', { class: 'muted small' }, 'loading…'));
+      const body = h('div', { class: 'protocol-body' }, protocolText.has(s.id) ? md(protocolText.get(s.id), 'protocol-text')
+        : h('p', { class: 'muted small' }, 'loading…'));
       const when = p.last ? ', last at ' + p.last.slice(11, 16) : '';
       const det = h('details', { class: 'protocol' },
         h('summary', { class: 'small' }, `Protocol (${p.entries} ${p.entries === 1 ? 'entry' : 'entries'}${when})`), body);
       const live = s.state === 'active';
       if (live) { det.classList.add('protocol-live'); body.classList.add('following'); }
+      // Following: stay at the newest line, unless the reader scrolled up.
+      const place = keepScroll(body, 'protocol:' + s.id, live);
       async function fill() {
-        // Following: stay at the newest line, unless the reader scrolled up.
-        const atEnd = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
         try {
           const r = await api('GET', `/api/r/${slug}/protocol/${view.id}/${s.id}`);
+          if (r.text === protocolText.get(s.id)) return;
+          protocolText.set(s.id, r.text);
           body.replaceChildren(md(r.text, 'protocol-text'));
-        } catch (e) { body.replaceChildren(h('p', { class: 'small' }, 'cannot load the protocol: ' + e.message)); }
-        if (live && (atEnd || !body.dataset.seen)) { body.scrollTop = body.scrollHeight; body.dataset.seen = '1'; }
+        } catch (e) { protocolText.delete(s.id); body.replaceChildren(h('p', { class: 'small' }, 'cannot load the protocol: ' + e.message)); }
+        place();
       }
       det.addEventListener('toggle', () => {
         if (det.open) { openProtocols.add(s.id); closedProtocols.delete(s.id); fill(); }
@@ -1157,9 +1314,9 @@
       li.append(head);
       if (tick && tick.state === 'done' && state !== 'done') li.append(h('div', { class: 'kv' }, 'done in the page; not yet in the file'));
       const meta = [];
-      if ((s.needs || []).length) meta.push('needs ' + s.needs.join(', '));
+      if ((s.needs || []).length) meta.push(['needs ', ...refList(s.needs)]);
       if (s.commit) meta.push('commit ' + s.commit);
-      if (meta.length) li.append(h('div', { class: 'kv' }, meta.join(' · ')));
+      if (meta.length) li.append(h('div', { class: 'kv' }, meta.map((m, i) => [i ? ' · ' : '', m])));
       if (s.reason) li.append(h('div', { class: 'small' }, h('strong', {}, state + ': '), s.reason));
       const proto = (view.protocols || {})[s.id];
       if (state === 'active' && proto && proto.last_note) {
@@ -1175,10 +1332,15 @@
       if (s.gate) {
         const a = (view.approvals || {})[s.id] || { status: 'none' };
         const box = h('div', { class: 'gatebox ' + (a.status === 'approved' ? 'approved' : a.status === 'disapproved' ? 'disapproved' : '') });
-        box.append(h('div', { class: 'small' }, h('strong', {}, 'Needs your approval before it starts. '), statusText(a, 'this step')));
         const finished = state === 'done' || state === 'dropped';
-        if (a.status === 'stale' && !finished) box.append(reviewButton());
-        else if (!finished) box.append(approveRow(a, `approval/${view.id}/${s.id}`));
+        // A done step never answered was done without approval: say so.
+        const lead = state === 'done' && a.status === 'none' ? 'Done without your approval. ' : 'Needs your approval before it starts. ';
+        box.append(h('div', { class: 'small' }, h('strong', {}, lead), statusText(a, 'this step')));
+        // A done step whose text changed after its approval is reviewed too, and
+        // one never answered is approved afterwards: check asks for that answer,
+        // and nothing else could give it.
+        if (a.status === 'stale' && state !== 'dropped') box.append(reviewButton());
+        else if (!finished || (state === 'done' && a.status === 'none')) box.append(approveRow(a, `approval/${view.id}/${s.id}`));
         li.append(box);
       }
       li.append(comments(s.id));
@@ -1199,10 +1361,11 @@
       try { localStorage.setItem(LAYOUT_KEY, value); } catch (e) { /* private window */ }
       drawReview();
     }
-    function isOpenStep(s) { return s && s.state !== 'done' && s.state !== 'dropped'; }
+    // A dropped step needs no answer; a done one does when it changed since.
+    function isReviewable(s) { return s && s.state !== 'dropped'; }
     function allSteps(v) { return (v.data.phase || []).flatMap(ph => ph.step || []); }
     function staleSteps(v) {
-      return allSteps(v).filter(s => s.gate && isOpenStep(s) && ((v.approvals || {})[s.id] || {}).status === 'stale');
+      return allSteps(v).filter(s => s.gate && isReviewable(s) && ((v.approvals || {})[s.id] || {}).status === 'stale');
     }
     function stalePlan(v) { return (v.plan_approval || {}).status === 'stale' ? v.plan_approval : null; }
     function staleApproval(v, local) {

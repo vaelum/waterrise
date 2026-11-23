@@ -632,7 +632,20 @@ def worktree_warnings(report: Report, root: Path, planning: Path, checkout: Path
                                                  f"elsewhere; nothing reads this one: edit {at} there")
 
 
-def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> Report:
+def protocol_findings(folder: Folder) -> list[Finding]:
+    """What `run` says about the plans' protocols, alone: the service keeps the
+    rest of a check while an agent's output streams into a protocol, and asks
+    this (each protocol's scan kept by its size and mtime) on every request."""
+    report = Report(folder=folder)
+    for it in folder.items:
+        if it.parsed and it.kind == "plan" and it.id:
+            _check_protocols(report, folder, it)
+    return report.findings
+
+
+def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True, protocols: bool = True) -> Report:
+    """Every check on `folder`. Without `protocols`, the plans' protocols are left
+    out: `protocol_findings` says those."""
     today = today or _dt.date.today()
     report = Report(folder=folder)
 
@@ -705,7 +718,7 @@ def run(folder: Folder, *, today: _dt.date | None = None, git: bool = True) -> R
                                  and ID_RE.match(r)]
         if it.kind == "report":
             _check_report(report, folder, it, ids)
-        if it.kind == "plan" and it.id:
+        if it.kind == "plan" and it.id and protocols:
             _check_protocols(report, folder, it)
 
     claimed = {report_document(it).relative_to(folder.root).as_posix()

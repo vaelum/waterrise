@@ -69,6 +69,27 @@ def test_a_protocol_shows_in_the_check_at_once(page):
     assert any("credential" in f.message for f in rep.of("error"))
 
 
+def test_a_growing_protocol_keeps_the_read_and_the_check(page, monkeypatch):
+    """An agent's run appends to a protocol on every line of output: that must not
+    read the folder or check it again on every request (2026-11-18: the plan page
+    of a project with a run going took 2.5 s a load, every half second)."""
+    repo, e = page
+    proto = repo / "planning" / "protocols" / "p-4k7x2m"
+    proto.mkdir(parents=True)
+    (proto / "s1-1.md").write_text("\n## 2026-11-10 12:00:00 note\nok\n", encoding="utf-8")
+    service.item_view(e, "p-4k7x2m")
+    folder = service._folder_view(e)
+    runs = []
+    real = check.run
+    monkeypatch.setattr(check, "run", lambda *a, **k: runs.append(1) or real(*a, **k))
+    with (proto / "s1-1.md").open("a", encoding="utf-8") as fh:
+        fh.write("a line of output\n")
+    view = service.item_view(e, "p-4k7x2m")
+    assert service._folder_view(e) is folder
+    assert runs == []
+    assert view["protocols"]["s1-1"]["entries"] == 1, "the protocols themselves are read fresh"
+
+
 def test_a_plan_changed_in_a_worktree_shows_at_once(page):
     repo, e = page
     assert run(repo, "assign", "p-4k7x2m", "foo") == 0

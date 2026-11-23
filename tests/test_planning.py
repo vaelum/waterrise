@@ -282,6 +282,19 @@ def test_a_done_step_needs_what_it_needs_done(proj):
     assert any("s1-3 is done, but what it needs is not: s1-2" in m for m in messages(report(proj)))
 
 
+def test_a_dropped_step_holds_nothing_up(proj):
+    # s1-2 dropped, s1-3 (which needs it) done: the plan can finish as written,
+    # without editing s1-3's needs, which would make a gated step's approval stale.
+    text = plan_text().replace('gate = true', 'gate = true\n  state = "dropped"\n  reason = "not needed"')
+    text = text.replace('title = "Confirm the phone rings"\n  by = "user"',
+                        'title = "Confirm the phone rings"\n  by = "user"\n  state = "done"')
+    put(proj, "draft/a.toml", text)
+    assert not any("what it needs is not" in m for m in messages(report(proj)))
+    it = folder.read(proj / "planning", proj).get("p-4k7x2m")
+    assert state.satisfied("s1-2", it)
+    step = next(s for s in it.steps() if s["id"] == "s1-3")
+    assert state.waiting_on(step, it) == []
+
 def test_markdown_plans_and_stray_files_are_warnings(proj):
     put(proj, "done/old.md", "# Old\n- [x] thing\n")
     put(proj, "draft/form.html", "<html></html>")
@@ -330,6 +343,42 @@ def test_a_gated_step_done_without_approval_fails_check(proj):
     assert any("gated and done, but has no current approval" in m for m in messages(report(proj)))
     approve(proj, "p-4k7x2m", "s1-2")
     assert not any("no current approval" in m for m in messages(report(proj)))
+
+
+def test_a_done_gated_step_edited_after_approval_waits_on_the_user(proj):
+    done = plan_text().replace('gate = true', 'gate = true\n  state = "done"')
+    done = done.replace('title = "A check per service"\n  by = "agent"',
+                        'title = "A check per service"\n  by = "agent"\n  state = "done"')
+    done = done.replace('because = "It runs already."', 'because = "x"\nresolved = ["ntfy"]\noutcome = "o"')
+    put(proj, "draft/a.toml", done)
+    approve(proj, "p-4k7x2m", "s1-2")
+    put(proj, "draft/a.toml", done.replace('title = "Deploy"', 'title = "Deploy it"'))
+    assert any("gated and done, but has no current approval" in m for m in messages(report(proj)))
+    f = folder.read(proj / "planning", proj)
+    s = state.summarize(f.get("p-4k7x2m"), answers.read(f.answers_path("p-4k7x2m"), "p-4k7x2m"))
+    assert any(w == "approval" and sid == "s1-2" and "done; changed since" in t for w, sid, t in s.for_user)
+    # Answered again on the new text, it is current; a done step not edited asks nothing.
+    approve(proj, "p-4k7x2m", "s1-2")
+    assert not any("no current approval" in m for m in messages(report(proj)))
+    f = folder.read(proj / "planning", proj)
+    s = state.summarize(f.get("p-4k7x2m"), answers.read(f.answers_path("p-4k7x2m"), "p-4k7x2m"))
+    assert not any(w == "approval" for w, _, _ in s.for_user)
+
+def test_a_gated_step_done_without_approval_waits_on_the_user(proj):
+    done = plan_text().replace('gate = true', 'gate = true\n  state = "done"')
+    done = done.replace('title = "A check per service"\n  by = "agent"',
+                        'title = "A check per service"\n  by = "agent"\n  state = "done"')
+    done = done.replace('because = "It runs already."', 'because = "x"\nresolved = ["ntfy"]\noutcome = "o"')
+    put(proj, "draft/a.toml", done)
+    assert any("gated and done, but has no current approval" in m for m in messages(report(proj)))
+    f = folder.read(proj / "planning", proj)
+    s = state.summarize(f.get("p-4k7x2m"), answers.read(f.answers_path("p-4k7x2m"), "p-4k7x2m"))
+    assert any(w == "approval" and sid == "s1-2" and "done without your approval" in t for w, sid, t in s.for_user)
+    approve(proj, "p-4k7x2m", "s1-2")
+    assert not any("no current approval" in m for m in messages(report(proj)))
+    f = folder.read(proj / "planning", proj)
+    s = state.summarize(f.get("p-4k7x2m"), answers.read(f.answers_path("p-4k7x2m"), "p-4k7x2m"))
+    assert not any(w == "approval" for w, _, _ in s.for_user)
 
 
 def test_gate_opens_on_approval_and_closes_when_the_step_changes(proj, capsys):

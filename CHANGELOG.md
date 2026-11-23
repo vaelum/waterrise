@@ -7,6 +7,49 @@ accepts an installed waterrise that is at least the pin, as long as the pin is
 not older than `OLDEST_PIN` (the oldest one it still serves; a release that
 breaks its callers raises it). Keep these sections accurate before tagging.
 
+## [2026.11.3]
+
+### Added
+
+- **`needs` are links.** A step's `needs`, an item's `needs`, `context` and
+  `related`, and "waits on" in the to-do jump to the step, phase or decision they
+  name (it opens and flashes; Back returns to where one was), or open the other
+  item (`p-…/s2-1` at that step). One that is done is struck through.
+
+### Fixed
+
+- **A dropped step holds nothing up.** A step that needs a dropped one was
+  never satisfied, so a done step after it failed `check` ("what it needs is
+  not: …"). Taking the dropped step out of its `needs` made a gated step's
+  approval stale, which the page then offered no way to answer. A dropped step
+  now counts as finished, as it already did inside a phase.
+- **A done gated step edited after its approval can be approved again.**
+  `check` asks for a current approval on a done gated step, but the page showed
+  no controls once a step was done. Now such a step shows **Review changes**,
+  the review popup takes it, and `status` lists it as waiting on the user.
+- **A gated step done without any approval can be approved afterwards.**
+  `check` fails on it ("has no current approval: … has not answered"), but the
+  page showed no controls on a done step that was never answered, so nothing
+  could clear the error. Such a step now says it was done without approval and
+  shows Approve and Disapprove, and `status` lists it as waiting on the user.
+- **A plan's page stays quick while an agent's run streams output.** Every line
+  `waterrise run` writes made the page fetch and redraw the whole plan every half
+  second, several requests at once (a big plan: 0.8–1.9 s each, the browser busy
+  79% of the time). Now the stream says a protocol only `grew` apart from a plan
+  that changed; a page reloads one request at a time, at most once a second, and
+  every 4 s for growth alone; an answer that did not change is not redrawn, and a
+  late answer never overwrites a newer one. The service keeps its folder read and
+  check while only protocols grow (it asks what the protocols say fresh, so a
+  credential still shows at once) and keeps protocol summaries by size and mtime:
+  the same plan's page now answers in ~30 ms, not 0.3–2.5 s.
+
+- **A page holds still when its plan changes.** A re-render (the agent edits the
+  plan, a save) no longer closes the folds one has open or opens the ones one
+  closed: the Progress outline and its phases, design sections, a finding's
+  evidence. Their defaults count once; only a phase that starts opens itself. The
+  page, the panel beside the plan, the chat and an open protocol keep their scroll
+  position, and an open protocol no longer collapses to "loading…" on the way.
+
 ## [2026.11.2]
 
 ### Added

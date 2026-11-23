@@ -26,7 +26,7 @@ function open() {
   stream.addEventListener('change', e => {
     let data = {};
     try { data = JSON.parse(e.data) || {}; } catch (err) { data = {}; }
-    send({ type: 'change', index: !!data.index, slugs: data.slugs || [] });
+    send({ type: 'change', index: !!data.index, slugs: data.slugs || [], grew: data.grew || [] });
   });
   stream.onopen = () => send({ type: 'open' });
   stream.onerror = () => send({ type: 'error' });

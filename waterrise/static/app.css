@@ -248,6 +248,11 @@ body[data-view="item"] main { display: flex; flex-wrap: wrap; gap: 48px; align-i
 .kvs { font: 13px/1.6 var(--font-ui); color: var(--muted); }
 .kv { font: 13px/1.6 var(--font-ui); color: var(--muted); }
 .kv code { color: var(--fg); }
+/* A reference that jumps: to a step, phase or decision here, or to another item. */
+a.ref { font-size: 12px; padding: 0 .3em; border-radius: 4px; background: color-mix(in srgb, var(--accent) 10%, transparent); text-decoration: none; }
+a.ref:hover, a.ref:focus-visible { text-decoration: underline; }
+a.ref.ref-done { color: var(--muted); background: transparent; text-decoration: line-through; text-decoration-thickness: 1px; }
+a.ref.ref-done:hover { text-decoration: line-through underline; }
 .reading:not(h2):not(h3) { text-wrap: pretty; }
 ul.reading { padding-left: 1.4rem; }
 .prose { overflow-wrap: anywhere; }

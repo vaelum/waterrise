@@ -305,8 +305,12 @@ _kept: dict[tuple[str, str], tuple[tuple, object]] = {}
 
 
 def _view_key(entry: dict, signature: str | None = None) -> tuple:
+    """Without the protocols' bytes: an agent's `waterrise run` appends to one on
+    every line of output, and nothing kept here is read from them (the folder
+    read skips protocols/, the kept check leaves them out). A protocol that is
+    added still counts."""
     root = Path(entry["path"])
-    return (json.dumps(entry, sort_keys=True, default=str), signature or _signature(entry),
+    return (json.dumps(entry, sort_keys=True, default=str), signature or _signature(entry, protocols=False),
             layout._stamp(root / ".gitignore"))
 
 
@@ -328,9 +332,17 @@ def _folder_view(entry: dict, key: tuple | None = None) -> folder_mod.Folder:
     return _kept_or(entry, "folder", key or _view_key(entry), lambda: _folder(entry))
 
 
-def _check_view(entry: dict, f: folder_mod.Folder, key: tuple):
-    return _kept_or(entry, "check", (*key, _dt.date.today().isoformat()),
-                    lambda: check_mod.run(f, git=False))
+def _check_view(entry: dict, f: folder_mod.Folder, key: tuple) -> check_mod.Report:
+    """The check a page shows: everything but the protocols kept on `key`, and
+    what the protocols say asked now, so a credential in a growing protocol
+    shows at once without checking the whole folder again per line."""
+    kept = _kept_or(entry, "check", (*key, _dt.date.today().isoformat()),
+                    lambda: check_mod.run(f, git=False, protocols=False))
+    order = {"error": 0, "warn": 1, "info": 2}
+    findings = sorted([*kept.findings, *check_mod.protocol_findings(f)],
+                      key=lambda x: (x.file, order.get(x.level, 3), x.line or 0))
+    return check_mod.Report(folder=f, findings=findings, counts=kept.counts,
+                            waiting_user=kept.waiting_user, waiting_agent=kept.waiting_agent)
 
 
 def forget_views() -> None:
@@ -347,16 +359,23 @@ def _watched(entry: dict) -> list[Path]:
     return [planning, *(h.planning for h in folder_mod.worktree_homes(planning.resolve(), central.git_root(entry).resolve()))]
 
 
+def _signatures(entry: dict, *, protocols: bool = True) -> tuple[str, str]:
+    """(the plan's, the plan's with every protocol byte), from one walk; without
+    `protocols` the second is the first."""
+    pairs = [_tree_signatures(p, protocols=protocols) for p in _watched(entry)]
+    return "".join(a for a, _ in pairs), "".join(b for _, b in pairs)
+
+
 def _signature(entry: dict, *, protocols: bool = True) -> str:
-    return "".join(_tree_signature(p, protocols=protocols) for p in _watched(entry))
+    return _signatures(entry, protocols=protocols)[1]
 
 
-_ticks: dict[tuple, tuple[float, str]] = {}
+_ticks: dict[tuple, tuple[float, tuple[str, str]]] = {}
 _ticks_lock = threading.Lock()
 
 
-def _tick_signature(entry: dict, *, protocols: bool = True) -> str:
-    """`_signature` for the change streams: computed once for every stream that
+def _tick_signatures(entry: dict, *, protocols: bool = True) -> tuple[str, str]:
+    """`_signatures` for the change streams: computed once for every stream that
     asks within the same half tick, so many open tabs cost one walk. Only for
     the streams: a page's request reads `_signature` itself, so it always sees
     its own write (p-pw7ft8 s3-4)."""
@@ -366,10 +385,14 @@ def _tick_signature(entry: dict, *, protocols: bool = True) -> str:
         hit = _ticks.get(key)
     if hit is not None and now - hit[0] < Handler.EVENT_TICK / 2:
         return hit[1]
-    sig = _signature(entry, protocols=protocols)
+    sig = _signatures(entry, protocols=protocols)
     with _ticks_lock:
         _ticks[key] = (now, sig)
     return sig
+
+
+def _tick_signature(entry: dict, *, protocols: bool = True) -> str:
+    return _tick_signatures(entry, protocols=protocols)[1]
 
 
 def _home_view(home: folder_mod.Home | None, known: list) -> dict | None:
@@ -553,7 +576,8 @@ def timeline(it: folder_mod.Item, notes: list[dict]) -> tuple[list[dict], int]:
 
 
 def item_view(entry: dict, item_id: str) -> dict | None:
-    f = _folder_view(entry)
+    key = _view_key(entry)
+    f = _folder_view(entry, key)
     it = f.get(item_id)
     if it is None:
         return None
@@ -570,7 +594,7 @@ def item_view(entry: dict, item_id: str) -> dict | None:
         "plan_approval_required": f.plan_approval,
         "approvals": jsonable(approvals),
         "summary": summarize(it, ans, plan_approval_required=f.plan_approval, ids=f.by_id()).as_json(),
-        "problems": [x.as_json() for x in check_mod.run(f, git=False).findings
+        "problems": [x.as_json() for x in _check_view(entry, f, key).findings
                      if x.file in (it.rel, f"answers/{it.id}.json") and x.level != "info"],
     }
     if it.kind == "plan":
@@ -596,25 +620,31 @@ def item_view(entry: dict, item_id: str) -> dict | None:
 
 
 def _tree_signature(root: Path, *, protocols: bool = True) -> str:
+    return _tree_signatures(root, protocols=protocols)[1]
+
+
+def _tree_signatures(root: Path, *, protocols: bool = True) -> tuple[str, str]:
     """Names, sizes and mtimes of everything under `root`: changes when any
     file is written, added, moved or deleted. Polled, not inotify: stdlib-only.
     One `scandir` walk, which stats as it lists (p-pw7ft8 s3-4).
 
-    Without `protocols`, the protocols folder counts by the mtimes of its plan
-    folders only: a protocol that is added shows, one that grows does not. The
-    index needs no more; a plan's own page watches every line."""
-    h = hashlib.sha256()
-    stack = [str(root)]
+    Two hashes from the one walk. The first counts the protocols folder by the
+    mtimes of its plan folders only: a protocol that is added shows, one that
+    grows does not. The second also has every protocol's size and mtime, so a
+    plan's page can tell "the plan changed" from "an agent's output grew" (what
+    `waterrise run` writes on every line). Without `protocols` only the first is
+    walked, and returned twice."""
+    plan, full = hashlib.sha256(), hashlib.sha256()
+    stack = [(str(root), False)]
     top = os.path.join(str(root), protocol_mod.FOLDER)
     seen = False
     while stack:
-        d = stack.pop()
+        d, inside = stack.pop()
         try:
             entries = sorted(os.scandir(d), key=lambda x: x.name)
         except OSError:
             continue
         seen = True
-        shallow = not protocols and d == top
         for x in entries:
             if x.name.endswith(".lock") or x.name.endswith(".tmp"):
                 continue
@@ -627,12 +657,20 @@ def _tree_signature(root: Path, *, protocols: bool = True) -> str:
                 is_dir = x.is_dir(follow_symlinks=False)
             except OSError:
                 continue
-            h.update(f"{x.path}:{st.st_mtime_ns}:{st.st_size};".encode())
-            if is_dir and not shallow:
-                stack.append(x.path)
+            line = f"{x.path}:{st.st_mtime_ns}:{st.st_size};".encode()
+            full.update(line)
+            if not inside:
+                plan.update(line)
+            if is_dir:
+                below = inside or d == top
+                if not below or protocols:
+                    stack.append((x.path, below))
     if not seen:
-        h.update(b"missing")
-    return h.hexdigest()
+        plan.update(b"missing")
+        full.update(b"missing")
+    if not protocols:
+        return plan.hexdigest(), plan.hexdigest()
+    return plan.hexdigest(), full.hexdigest()
 
 
 def _etag(*paths: Path) -> str:
@@ -831,23 +869,30 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(urlsplit(self.path).query)
         scope, slug = (q.get("scope") or ["index"])[0], (q.get("slug") or [""])[0]
 
-        def signatures() -> dict[str, str]:
-            """A signature per repository behind the stream, and "" for the registry."""
+        def signatures() -> dict[str, tuple[str, str]]:
+            """(plan, with protocols) per repository behind the stream, and "" for the registry."""
             if scope == "repo":
                 entry = self.registry.by_slug(slug)
-                return {slug: _tick_signature(entry)} if entry else {}
+                return {slug: _tick_signatures(entry)} if entry else {}
             # scope=all is what the shared worker holds for every tab, plan pages
             # with their live protocols included; only an index page's own
             # stream may skip what protocols say.
-            sigs = {r["slug"]: _tick_signature(r, protocols=scope != "index") for r in self.registry.repos}
-            sigs[""] = _etag(self.registry.path)
+            sigs = {r["slug"]: _tick_signatures(r, protocols=scope != "index") for r in self.registry.repos}
+            reg = _etag(self.registry.path)
+            sigs[""] = (reg, reg)
             return sigs
 
-        def change(last: dict[str, str], now: dict[str, str]) -> bytes:
-            if scope != "all":
-                return b"{}"
-            slugs = sorted(k for k in last.keys() | now.keys() if k and last.get(k) != now.get(k))
-            return json.dumps({"index": True, "slugs": slugs}).encode()
+        def change(last: dict, now: dict) -> bytes:
+            """`slugs`: the projects whose plans changed. `grew`: those where only
+            a protocol grew, which a page may follow at a slower pace (an agent's
+            run writes a line at a time). `index`: whether the index changed."""
+            keys = last.keys() | now.keys()
+            plan = {k for k in keys if (last.get(k) or ("", ""))[0] != (now.get(k) or ("", ""))[0]}
+            grew = {k for k in keys if k not in plan and last.get(k) != now.get(k)}
+            if scope == "repo":
+                return json.dumps({"grew": not plan}).encode()
+            return json.dumps({"index": bool(plan), "slugs": sorted(k for k in plan if k),
+                               "grew": sorted(k for k in grew if k)}).encode()
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")

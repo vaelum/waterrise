@@ -133,7 +133,8 @@ steps. The user approves the plan as a whole before it leaves `draft/` (when
 - A user step says exactly what to do, where, and what to report back.
 - `done_when` says how to tell it is done; `needs` names the decisions, steps
   or phases that come first (`needs = ["alerts", "s1-1", "p1"]`, or
-  `p-4k7x2m/s2-1` in another item).
+  `p-4k7x2m/s2-1` in another item). A dropped step counts as finished:
+  leave it in the `needs` of the steps after it.
 - States: `open`, `active`, `done`, `blocked`, `dropped`. `blocked` and
   `dropped` need a `reason`. `done` takes the `commit`.
 - **Gates.** A step gets `gate = true` when it is hard to undo or visible
@@ -198,7 +199,8 @@ forgot to set to `done` never shows. `waterrise status` prints the same list.
   since it was drawn is refused, so the user sees your edit before approving it.
 - An approval covers the step's text: every field but `state`, `commit` and
   `reason`. Editing a gated step after its approval makes the approval stale.
-  Record progress on it in the `[[log]]`, not in the step.
+  Record progress on it in the `[[log]]`, not in the step. An edit to a gated
+  step that is already done asks again too: the user reviews it in the page.
 - A disapproved step is dropped (`state = "dropped"`, `reason` = the user's
   note) or rewritten, which asks the user again.
 - `waterrise gate <id>` without a step checks the plan's own approval, which
